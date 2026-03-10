@@ -53,6 +53,8 @@ class SearchScreen extends StatelessWidget {
               itemCount: 10,
               itemBuilder: (context, index) {
                 final String name = '山田 花子 $index';
+                final String hobby = '最近はFlutterでマッチングアプリを作るのにハマっています！USCPAの勉強も並行しているので、いかに効率よくコードを書くかを考えるのが楽しいです。将来はこのアプリをきっかけに良い出会いがあればいいなと思っています。';
+                final String location = "愛知県";
                 return InkWell(
                   onTap: () => Navigator.push(
                     context,
@@ -74,7 +76,21 @@ class SearchScreen extends StatelessWidget {
                         ),
                         Padding(
                           padding: const EdgeInsets.all(8.0),
-                          child: Text(name, style: const TextStyle(fontWeight: FontWeight.bold)),
+                          child: Text(
+                            name, 
+                            style: const TextStyle(fontWeight: FontWeight.bold),
+                            ),
+                        ),
+                        // --- 追加：ハマっていることエリア ---
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(8.0, 0, 8.0, 8.0),
+                          child: Text(
+                            hobby,
+                            textAlign: TextAlign.left,
+                            style: TextStyle(fontSize: 11, color: Colors.grey[700]),
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
                         ),
                       ],
                     ),

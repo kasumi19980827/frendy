@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:matching_app/screens/friends_screen.dart';
+import 'package:matching_app/screens/home_screen.dart';
 import 'package:matching_app/screens/profile_detail_screen.dart';
 import 'package:matching_app/screens/search_screen.dart'; // プロフ詳細
 
@@ -38,10 +40,10 @@ class _MyHomePageState extends State<MyHomePage> {
   // 各タブに対応する画面リスト
   List<Widget> _getPages(){
   return [
-    const Center(child: Text('ホーム')),
+    const HomeScreen(),
     const SearchScreen(), 
     const Center(child: Text('トーク')), 
-    const Center(child: Text('友達一覧')), // お気に入りから友達に変更
+    const FriendsScreen(),
     const Center(child: Text('プロフ設定')), 
   ];
   }

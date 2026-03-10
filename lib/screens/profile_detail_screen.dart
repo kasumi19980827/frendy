@@ -221,7 +221,7 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
               ),
             ),
 
-            _buildSectionTitle('最近ハマってること'),
+            _buildSectionTitle('今取り組んでいること / ハマってること'),
             const Padding(
               padding: EdgeInsets.symmetric(horizontal: 16),
               child: Text(
@@ -239,11 +239,29 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
               ),
             ),
 
-            _buildSectionTitle('タイトル'),
+               _buildSectionTitle('自分の性格'),
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 16),
+              child: Text(
+                '穏やかだとよく言われます',
+                style: TextStyle(fontSize: 15, height: 1.5),
+              ),
+            ),
+
+            _buildSectionTitle('夢・目標'),
             const Padding(
               padding: EdgeInsets.symmetric(horizontal: 16),
               child: Text(
                 '将来はUSCPAを取得して海外で働きたいと考えています。同じ目標を持っている方や、プログラミングが好きな方と繋がりたいです！',
+                style: TextStyle(fontSize: 15, height: 1.5),
+              ),
+            ),
+
+            _buildSectionTitle('こんな友達が欲しい！'),
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 16),
+              child: Text(
+                '趣味が違っても、気軽に話したり飲みに行ったりできる友達が欲しいです！',
                 style: TextStyle(fontSize: 15, height: 1.5),
               ),
             ),
