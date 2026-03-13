@@ -1,17 +1,16 @@
 import 'package:flutter/material.dart';
+import 'package:matching_app/main.dart';
 
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
-    final themeColor = Theme.of(context).colorScheme.primary;
-    final primaryColor =Theme.of(context).colorScheme.inversePrimary;
-
     return Scaffold(
       appBar: AppBar(
-        title: const Text('frendy', style: TextStyle(fontWeight: FontWeight.bold)),
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+        title: const Text('ホーム', style: TextStyle(fontWeight: FontWeight.bold)),
+        centerTitle: true,
+        elevation: 0,
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16.0),
@@ -21,7 +20,7 @@ class HomeScreen extends StatelessWidget {
             // --- お知らせセクション ---
             const Row(
               children: [
-                Icon(Icons.campaign, color: Colors.orange),
+                Icon(Icons.campaign, color: AppColors.point),
                 SizedBox(width: 8),
                 Text('運営からのお知らせ', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
               ],
@@ -35,7 +34,7 @@ class HomeScreen extends StatelessWidget {
             // --- 意見送信フォームセクション ---
             const Row(
               children: [
-                Icon(Icons.rate_review, color: Colors.blue),
+                Icon(Icons.rate_review, color: AppColors.pink),
                 SizedBox(width: 8),
                 Text('運営へのご意見・ご要望', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
               ],
@@ -67,8 +66,8 @@ class HomeScreen extends StatelessWidget {
                           );
                         },
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: Color(0xFFFF8A80),
-                          foregroundColor: Colors.white,
+                          backgroundColor: AppColors.pink,
+                          foregroundColor: AppColors.white,
                         ),
                         child: const Text('送信する'),
                       ),

@@ -7,11 +7,9 @@ class SearchScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      // AppBarに検索タイトルを表示
       appBar: AppBar(
         title: const Text('frendy', style: TextStyle(fontWeight: FontWeight.bold)),
         centerTitle: true,
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         elevation: 0,
       ),
       body: Column(

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:matching_app/screens/chat_screen.dart';
+import 'package:matching_app/main.dart';
 
 class ProfileDetailScreen extends StatefulWidget {
   final String userName;
@@ -47,17 +48,10 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
   @override
   Widget build(BuildContext context) {
     final double screenWidth = MediaQuery.of(context).size.width;
-    
-    // AppBarで使用している色を取得
-    final Color themeColor = Theme.of(context).colorScheme.inversePrimary;
-    // テキストなどに見やすい少し濃い目のメインカラーを取得
-    final Color primaryColor = Theme.of(context).colorScheme.primary;
-
     return Scaffold(
       appBar: AppBar(
         title: const Text('frendy', style: TextStyle(fontWeight: FontWeight.bold)),
         centerTitle: true,
-        backgroundColor: themeColor,
         elevation: 0,
       ),
       body: SingleChildScrollView(
@@ -107,7 +101,7 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
                       decoration: BoxDecoration(
                         shape: BoxShape.circle, 
                         // インジケーターの色も合わせる
-                        color: _currentPage == index ? primaryColor : Colors.white70
+                        color: _currentPage == index ? AppColors.green : Colors.white70
                       ),
                     )),
                   ),
@@ -135,11 +129,11 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
                 spacing: 5.0,
                 runSpacing: 4.0,
                 children: [
-                  _buildTag('飲み友募集', themeColor, primaryColor),
-                  _buildTag('恋人募集', themeColor, primaryColor),
-                  _buildTag('年齢関係なし', themeColor, primaryColor),
-                  _buildTag('同年代と繋がりたい', themeColor, primaryColor),
-                  _buildTag('性別関係なし', themeColor, primaryColor),
+                  _buildTag('飲み友募集', AppColors.bg, AppColors.green),
+                  _buildTag('恋人募集', AppColors.bg, AppColors.green),
+                  _buildTag('年齢関係なし', AppColors.bg, AppColors.green),
+                  _buildTag('同年代と繋がりたい', AppColors.bg, AppColors.green),
+                  _buildTag('性別関係なし', AppColors.bg, AppColors.green),
                 ],
               ),
             ),
@@ -158,12 +152,15 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
                         child: ElevatedButton(
                           onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => ChatScreen(userName: widget.userName))),
                           style: ElevatedButton.styleFrom(
-                            backgroundColor: themeColor,
+                            backgroundColor: AppColors.bg,
                             padding: const EdgeInsets.symmetric(vertical: 15), 
                             shape: const RoundedRectangleBorder(borderRadius: BorderRadius.zero),
                             elevation: 0,
                           ),
-                          child: const Text('メッセージ', style: TextStyle(fontWeight: FontWeight.bold)),
+                          child: const Text('メッセージ', style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white, 
+                            )),
                         ),
                       ),
                       const SizedBox(width: 4),
@@ -171,14 +168,17 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
                       Expanded(
                         flex: 4, 
                         child: ElevatedButton(
-                          onPressed: () => _showSuperMessageDialog(context, themeColor, primaryColor),
+                          onPressed: () => _showSuperMessageDialog(context, AppColors.bg, AppColors.green),
                           style: ElevatedButton.styleFrom(
-                            backgroundColor: themeColor,
+                            backgroundColor: AppColors.bg,
                             padding: const EdgeInsets.symmetric(vertical: 15), 
                             shape: const RoundedRectangleBorder(borderRadius: BorderRadius.zero), 
                             elevation: 0,
                           ),
-                          child: const Text('ギフト', style: TextStyle(fontWeight: FontWeight.bold)),
+                          child: const Text('ギフト', style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white, 
+                            )),
                         ),
                       ),
                       const SizedBox(width: 4),
@@ -215,7 +215,7 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
                   // 友達申請ボタン
                   SizedBox(
                     width: double.infinity,
-                    child: _buildFriendRequestButton(themeColor, primaryColor),
+                    child: _buildFriendRequestButton(AppColors.bg, AppColors.green),
                   ),
                 ],
               ),

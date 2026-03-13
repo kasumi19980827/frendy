@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:matching_app/main.dart';
 
 class FriendsScreen extends StatefulWidget {
   const FriendsScreen({super.key});
@@ -8,18 +9,16 @@ class FriendsScreen extends StatefulWidget {
 }
 
 class _FriendsScreenState extends State<FriendsScreen> {
-  // 現在選択されているメニュー項目
   String _selectedMenu = '友達一覧';
-  // 足跡の課金状態（本来はユーザーデータから取得）
-  bool _isPremiumUser = false; 
+  bool _isPremiumUser = false;
 
   @override
   Widget build(BuildContext context) {
-    final Color themeColor = Theme.of(context).colorScheme.inversePrimary;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('frendy', style: TextStyle(fontWeight: FontWeight.bold)),
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+        title: const Text('友達', style: TextStyle(fontWeight: FontWeight.bold)),
+        centerTitle: true,
+        elevation: 0,
       ),
       body: Row(
         children: [
@@ -32,24 +31,24 @@ class _FriendsScreenState extends State<FriendsScreen> {
             ),
             child: Column(
               children: [
-                _buildMenuItem('友達一覧', Icons.group, themeColor),
-                _buildMenuItem('いいね\nした', Icons.thumb_up_alt_outlined, themeColor),
-                _buildMenuItem('いいね\nされた', Icons.thumb_up_alt, themeColor),
-                _buildMenuItem('足跡', Icons.visibility, themeColor),
+                _buildMenuItem('友達一覧', Icons.group),
+                _buildMenuItem('いいね', Icons.thumb_up_alt_outlined),
+                _buildMenuItem('いいね\nされた', Icons.thumb_up_alt),
+                _buildMenuItem('足跡', Icons.visibility),
               ],
             ),
           ),
           // --- 右側：コンテンツエリア ---
           Expanded(
-            child: _buildContent(themeColor),
+            child: _buildContent(),
           ),
         ],
       ),
     );
   }
 
-  // メニュー項目の作成
-  Widget _buildMenuItem(String title, IconData icon, Color themeColor) {
+  // ✅ パラメータ名を color に修正、AppColors.bgはデフォルト値として渡す
+  Widget _buildMenuItem(String title, IconData icon, {Color color = AppColors.point}) {
     bool isSelected = _selectedMenu == title;
     return InkWell(
       onTap: () {
@@ -60,47 +59,55 @@ class _FriendsScreenState extends State<FriendsScreen> {
       child: Container(
         width: double.infinity,
         padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 8),
-        color: isSelected ? Colors.white : Colors.transparent,
+        color: isSelected ? AppColors.white : Colors.transparent,
         child: Column(
           children: [
-            Icon(icon, color: isSelected ? themeColor : Colors.grey),
+            Icon(icon, color: isSelected ? color : Colors.grey),
             const SizedBox(height: 5),
-            Text(title, style: TextStyle(fontSize: 12, color: isSelected ? themeColor : Colors.black87)),
+            Text(
+              title,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 12,
+                color: isSelected ? color : Colors.black87,
+              ),
+            ),
           ],
         ),
       ),
     );
   }
 
-  // 右側の表示内容を切り替える
-  Widget _buildContent(Color themeColor) {
+  Widget _buildContent() {
     if (_selectedMenu == '足跡' && !_isPremiumUser) {
-      return _buildPremiumLockPage(themeColor);
+      return _buildPremiumLockPage();
     }
     return Center(
       child: Text('「$_selectedMenu」の内容がここに表示されます'),
     );
   }
 
-  // 足跡の有料ロック画面
-  Widget _buildPremiumLockPage(Color themeColor) {
+  Widget _buildPremiumLockPage() {
     return Container(
       padding: const EdgeInsets.all(20),
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          const Icon(Icons.lock_outline, size: 80, color: Color(0xFFFF8A80)),
+          const Icon(Icons.lock_outline, size: 80, color: AppColors.pink),
           const SizedBox(height: 20),
-          const Text('足跡機能はプレミアム限定', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          const Text('足跡機能はプレミアム限定',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
           const SizedBox(height: 10),
-          const Text('月額500円で誰があなたのプロフィールを見たか確認できます。', textAlign: TextAlign.center),
+          const Text('月額980円で誰があなたのプロフィールを見たか確認できます。',
+              textAlign: TextAlign.center),
           const SizedBox(height: 30),
           ElevatedButton(
             onPressed: () {
-              // 課金処理のシミュレーション
+              // 課金処理
             },
-            style: ElevatedButton.styleFrom(backgroundColor: Color(0xFFFF8A80)),
-            child: const Text('月額500円で登録', style: TextStyle(color: Colors.white)),
+            style: ElevatedButton.styleFrom(backgroundColor: AppColors.pink),
+            child: const Text('月額980円で登録',
+                style: TextStyle(color: AppColors.white)),
           ),
         ],
       ),
