@@ -50,7 +50,7 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
     final double screenWidth = MediaQuery.of(context).size.width;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('frendy', style: TextStyle(fontWeight: FontWeight.bold)),
+        title: const Text('友達を探す', style: TextStyle(fontWeight: FontWeight.bold)),
         centerTitle: true,
         elevation: 0,
       ),
@@ -159,7 +159,7 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
                           ),
                           child: const Text('メッセージ', style: TextStyle(
                             fontWeight: FontWeight.bold,
-                            color: Colors.white, 
+                            color: AppColors.appbarText, 
                             )),
                         ),
                       ),
@@ -177,7 +177,7 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
                           ),
                           child: const Text('ギフト', style: TextStyle(
                             fontWeight: FontWeight.bold,
-                            color: Colors.white, 
+                            color: AppColors.appbarText, 
                             )),
                         ),
                       ),

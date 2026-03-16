@@ -2,6 +2,7 @@
 import 'package:flutter/material.dart';
 import 'package:matching_app/screens/friends_screen.dart';
 import 'package:matching_app/screens/home_screen.dart';
+import 'package:matching_app/screens/profile_screen.dart';
 import 'package:matching_app/screens/search_screen.dart';
 
 class AppColors {
@@ -71,9 +72,9 @@ class _MyHomePageState extends State<MyHomePage> {
     _pages = [
       const HomeScreen(),
       const SearchScreen(),
-      const PlaceholderScreen(label: 'トーク'),
+      const PlaceholderScreen(label: 'メッセージ'),
       const FriendsScreen(),
-      const PlaceholderScreen(label: 'プロフ設定'),
+      const ProfileScreen(),
     ];
   }
 
@@ -93,7 +94,7 @@ class _MyHomePageState extends State<MyHomePage> {
         items: const [
           BottomNavigationBarItem(icon: Icon(Icons.home), label: 'ホーム'),
           BottomNavigationBarItem(icon: Icon(Icons.search), label: '探す'),
-          BottomNavigationBarItem(icon: Icon(Icons.forum), label: 'トーク'),
+          BottomNavigationBarItem(icon: Icon(Icons.forum), label: 'メッセージ'),
           BottomNavigationBarItem(icon: Icon(Icons.people), label: '友達'),
           BottomNavigationBarItem(icon: Icon(Icons.account_circle), label: 'プロフ'),
         ],
