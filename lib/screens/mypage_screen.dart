@@ -1,13 +1,13 @@
 import 'package:flutter/material.dart';
 
-class ProfileScreen extends StatelessWidget {
-  const ProfileScreen({super.key});
+class MypageScreen extends StatelessWidget {
+  const MypageScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('プロフィール設定'),
+        title: const Text('マイページ'),
       ),
       body: SingleChildScrollView(
         child: Column(

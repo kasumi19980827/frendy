@@ -1,14 +1,14 @@
 import 'package:flutter/material.dart';
 
-class ChatScreen extends StatefulWidget {
+class TalkScreen extends StatefulWidget {
   final String userName;
-  const ChatScreen({super.key, required this.userName});
+  const TalkScreen({super.key, required this.userName});
 
   @override
-  State<ChatScreen> createState() => _ChatScreenState();
+  State<TalkScreen> createState() => _ChatScreenState();
 }
 
-class _ChatScreenState extends State<ChatScreen> {
+class _ChatScreenState extends State<TalkScreen> {
   final TextEditingController _controller = TextEditingController();
   final List<String> _messages = []; // メッセージを保存するリスト
 

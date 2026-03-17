@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:matching_app/screens/chat_screen.dart';
 import 'package:matching_app/main.dart';
+import 'package:matching_app/screens/talk_screen.dart';
 
 class ProfileDetailScreen extends StatefulWidget {
   final String userName;
@@ -150,7 +150,7 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
                       Expanded(
                         flex: 4,
                         child: ElevatedButton(
-                          onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => ChatScreen(userName: widget.userName))),
+                          onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => TalkScreen(userName: widget.userName))),
                           style: ElevatedButton.styleFrom(
                             backgroundColor: AppColors.bg,
                             padding: const EdgeInsets.symmetric(vertical: 15), 
@@ -327,7 +327,7 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
             ElevatedButton(
               onPressed: () {
                 Navigator.pop(context);
-                Navigator.push(context, MaterialPageRoute(builder: (context) => ChatScreen(userName: widget.userName)));
+                Navigator.push(context, MaterialPageRoute(builder: (context) => TalkScreen(userName: widget.userName)));
               },
               style: ElevatedButton.styleFrom(backgroundColor: bgColor),
               child: Text('送金して送信', style: TextStyle(color: textColor)),
