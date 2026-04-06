@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "982968813521",
+    "project_id": "frendy-app-project",
+    "storage_bucket": "frendy-app-project.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:982968813521:android:786cc97b7317aec448c2f0",
+        "android_client_info": {
+          "package_name": "com.example.matching_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDdAYvSFl_qGyi4reCsYcR68cUzyhhrh_4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

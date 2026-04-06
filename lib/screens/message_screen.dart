@@ -1,3 +1,5 @@
+// トークしてる人の一覧の画面
+
 import 'package:flutter/material.dart';
 import 'package:matching_app/screens/talk_screen.dart';
 
@@ -8,7 +10,7 @@ class MessageScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('メッセージ'),
+        title: const Text('frendy'),
       ),
       body: ListView.separated(
         itemCount: 10, // ダミーで10件表示

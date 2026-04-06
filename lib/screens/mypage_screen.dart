@@ -1,4 +1,7 @@
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:matching_app/main.dart';
+import 'package:matching_app/screens/profile_setup_screen.dart';
 
 class MypageScreen extends StatelessWidget {
   const MypageScreen({super.key});
@@ -7,7 +10,7 @@ class MypageScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('マイページ'),
+        title: const Text('frendy'),
       ),
       body: SingleChildScrollView(
         child: Column(
@@ -31,7 +34,10 @@ class MypageScreen extends StatelessWidget {
               icon: Icons.edit,
               label: 'プロフィール編集',
               onTap: () {
-                // 編集画面への遷移処理をここに書く
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (context) => const ProfileSetupScreen()),
+                );
               },
             ),
             _buildSettingsItem(
@@ -62,8 +68,15 @@ class MypageScreen extends StatelessWidget {
               icon: Icons.logout,
               label: 'ログアウト',
               labelColor: Colors.redAccent,
-              onTap: () {
-                // ログアウト確認ダイアログなどを出す
+              onTap: () async{
+                await FirebaseAuth.instance.signOut();
+
+                            if (context.mounted) {
+                  Navigator.of(context, rootNavigator: true).pushAndRemoveUntil(
+                    MaterialPageRoute(builder: (context) => const MyApp()), // アプリ全体を再描画
+                    (route) => false,
+                  );
+                }
               },
             ),
             const SizedBox(height: 40),

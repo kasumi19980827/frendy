@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:matching_app/constants/app_colors.dart';
 import 'package:matching_app/main.dart';
 
 class HomeScreen extends StatelessWidget {
@@ -8,7 +9,7 @@ class HomeScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('ホーム', style: TextStyle(fontWeight: FontWeight.bold)),
+        title: const Text('frendy', style: TextStyle(fontWeight: FontWeight.bold)),
         centerTitle: true,
         elevation: 0,
       ),
@@ -67,7 +68,7 @@ class HomeScreen extends StatelessWidget {
                         },
                         style: ElevatedButton.styleFrom(
                           backgroundColor: AppColors.pink,
-                          foregroundColor: AppColors.white,
+                          foregroundColor: Colors.white,
                         ),
                         child: const Text('送信する'),
                       ),

@@ -1,5 +1,19 @@
 import 'package:flutter/material.dart';
+import 'package:matching_app/constants/app_colors.dart';
 import 'package:matching_app/main.dart';
+import 'package:matching_app/screens/profile_detail_screen.dart'; 
+
+class Friend {
+  final String name;
+  final String imageUrl;
+  final IconData defaultIcon;
+
+  Friend({
+    required this.name,
+    this.imageUrl = '',
+    this.defaultIcon = Icons.person,
+  });
+}
 
 class FriendsScreen extends StatefulWidget {
   const FriendsScreen({super.key});
@@ -9,20 +23,42 @@ class FriendsScreen extends StatefulWidget {
 }
 
 class _FriendsScreenState extends State<FriendsScreen> {
+  // 初期選択を「友達一覧」に設定
   String _selectedMenu = '友達一覧';
-  bool _isPremiumUser = false;
+
+  // --- 各メニューごとのデータリスト ---
+  final List<Friend> _friendsList = [
+    Friend(name: 'アヤカ'), Friend(name: 'タクヤ'), Friend(name: 'マナミ'),
+    Friend(name: 'ケンタ'), Friend(name: 'リナ'), Friend(name: 'ショウタ'),
+    Friend(name: 'ユウキ'), Friend(name: 'ヒナ'),
+  ];
+
+  final List<Friend> _likedList = [
+    Friend(name: 'サオリ'), Friend(name: 'ダイスケ'), Friend(name: 'ミズキ'),
+  ];
+
+  final List<Friend> _likedByList = [
+    Friend(name: 'ハルカ'), Friend(name: 'ソウタ'), Friend(name: 'ナナミ'), Friend(name: 'レン'),
+  ];
+
+  // ✅ 足跡（プロフィールを見た人）のリストを追加
+  final List<Friend> _visitorList = [
+    Friend(name: 'カレン'),
+    Friend(name: 'トモヤ'),
+    Friend(name: 'リオ'),
+  ];
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('友達', style: TextStyle(fontWeight: FontWeight.bold)),
+        title: const Text('frendy', style: TextStyle(fontWeight: FontWeight.bold)),
         centerTitle: true,
         elevation: 0,
       ),
       body: Row(
         children: [
-          // --- 左側：メニューエリア ---
+          // 左側のサイドメニュー
           Container(
             width: 80,
             decoration: BoxDecoration(
@@ -32,34 +68,32 @@ class _FriendsScreenState extends State<FriendsScreen> {
             child: Column(
               children: [
                 _buildMenuItem('友達一覧', Icons.group),
-                _buildMenuItem('いいね', Icons.thumb_up_alt_outlined),
+                _buildMenuItem('いいね\nした', Icons.thumb_up_alt_outlined),
                 _buildMenuItem('いいね\nされた', Icons.thumb_up_alt),
                 _buildMenuItem('足跡', Icons.visibility),
               ],
             ),
           ),
-          // --- 右側：コンテンツエリア ---
+          // 右側のメインコンテンツ
           Expanded(
-            child: _buildContent(),
+            child: Container(
+              color: Colors.white,
+              child: _buildContent(),
+            ),
           ),
         ],
       ),
     );
   }
 
-  // ✅ パラメータ名を color に修正、AppColors.bgはデフォルト値として渡す
   Widget _buildMenuItem(String title, IconData icon, {Color color = AppColors.point}) {
     bool isSelected = _selectedMenu == title;
     return InkWell(
-      onTap: () {
-        setState(() {
-          _selectedMenu = title;
-        });
-      },
+      onTap: () => setState(() => _selectedMenu = title),
       child: Container(
         width: double.infinity,
         padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 8),
-        color: isSelected ? AppColors.white : Colors.transparent,
+        color: isSelected ? Colors.white : Colors.transparent,
         child: Column(
           children: [
             Icon(icon, color: isSelected ? color : Colors.grey),
@@ -68,7 +102,8 @@ class _FriendsScreenState extends State<FriendsScreen> {
               title,
               textAlign: TextAlign.center,
               style: TextStyle(
-                fontSize: 12,
+                fontSize: 11,
+                fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
                 color: isSelected ? color : Colors.black87,
               ),
             ),
@@ -78,38 +113,63 @@ class _FriendsScreenState extends State<FriendsScreen> {
     );
   }
 
+  // ✅ コンテンツ切り替えロジック
   Widget _buildContent() {
-    if (_selectedMenu == '足跡' && !_isPremiumUser) {
-      return _buildPremiumLockPage();
+    switch (_selectedMenu) {
+      case '友達一覧':
+        return _buildUserList(_friendsList);
+      case 'いいね\nした':
+        return _buildUserList(_likedList);
+      case 'いいね\nされた':
+        return _buildUserList(_likedByList);
+      case '足跡':
+        // ✅ プレミアムロックを外して、リストを表示するように変更
+        return _buildUserList(_visitorList);
+      default:
+        return const Center(child: Text('選択してください'));
     }
-    return Center(
-      child: Text('「$_selectedMenu」の内容がここに表示されます'),
+  }
+
+  // リスト表示用ウィジェット（共通）
+  Widget _buildUserList(List<Friend> list) {
+    if (list.isEmpty) {
+      return const Center(child: Text('まだデータがありません', style: TextStyle(color: Colors.grey)));
+    }
+    return ListView.builder(
+      itemCount: list.length,
+      itemBuilder: (context, index) => _buildFriendListItem(list[index]),
     );
   }
 
-  Widget _buildPremiumLockPage() {
-    return Container(
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          const Icon(Icons.lock_outline, size: 80, color: AppColors.pink),
-          const SizedBox(height: 20),
-          const Text('足跡機能はプレミアム限定',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 10),
-          const Text('月額980円で誰があなたのプロフィールを見たか確認できます。',
-              textAlign: TextAlign.center),
-          const SizedBox(height: 30),
-          ElevatedButton(
-            onPressed: () {
-              // 課金処理
-            },
-            style: ElevatedButton.styleFrom(backgroundColor: AppColors.pink),
-            child: const Text('月額980円で登録',
-                style: TextStyle(color: AppColors.white)),
+  Widget _buildFriendListItem(Friend friend) {
+    return InkWell(
+      onTap: () {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (context) => ProfileDetailScreen(userName: friend.name),
           ),
-        ],
+        );
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        decoration: BoxDecoration(border: Border(bottom: BorderSide(color: Colors.grey[100]!))),
+        child: Row(
+          children: [
+            Container(
+              width: 50,
+              height: 50,
+              decoration: const BoxDecoration(shape: BoxShape.circle, color: Color(0xFFEEEEEE)),
+              child: friend.imageUrl.isEmpty
+                  ? Icon(friend.defaultIcon, color: Colors.grey[400])
+                  : ClipOval(child: Image.network(friend.imageUrl, fit: BoxFit.cover)),
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Text(friend.name, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500)),
+            ),
+          ],
+        ),
       ),
     );
   }
