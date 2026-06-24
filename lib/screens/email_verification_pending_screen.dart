@@ -7,10 +7,12 @@ class EmailVerificationPendingScreen extends StatefulWidget {
   const EmailVerificationPendingScreen({super.key});
 
   @override
-  State<EmailVerificationPendingScreen> createState() => _EmailVerificationPendingScreenState();
+  State<EmailVerificationPendingScreen> createState() =>
+      _EmailVerificationPendingScreenState();
 }
 
-class _EmailVerificationPendingScreenState extends State<EmailVerificationPendingScreen> {
+class _EmailVerificationPendingScreenState
+    extends State<EmailVerificationPendingScreen> {
   bool _isSending = false;
 
   // 最新のユーザー情報を取得して、認証済みか確認する
@@ -21,15 +23,15 @@ class _EmailVerificationPendingScreenState extends State<EmailVerificationPendin
     final updatedUser = FirebaseAuth.instance.currentUser;
 
     if (updatedUser != null && updatedUser.emailVerified) {
-    Navigator.pushAndRemoveUntil(
+      Navigator.pushAndRemoveUntil(
         context,
         MaterialPageRoute(builder: (context) => const MyHomePage()),
         (route) => false, // これまでの画面履歴（ログイン画面など）をすべて消去する
       );
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('まだ認証が完了していないようです。')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('まだ認証が完了していないようです。')));
     }
   }
 
@@ -39,15 +41,15 @@ class _EmailVerificationPendingScreenState extends State<EmailVerificationPendin
     try {
       await FirebaseAuth.instance.currentUser?.sendEmailVerification();
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('確認メールを再送しました。')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('確認メールを再送しました。')));
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('エラーが発生しました: $e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('エラーが発生しました: $e')));
       }
     } finally {
       if (mounted) setState(() => _isSending = false);
@@ -71,7 +73,11 @@ class _EmailVerificationPendingScreenState extends State<EmailVerificationPendin
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const Icon(Icons.mark_email_read_outlined, size: 100, color: AppColors.point),
+            const Icon(
+              Icons.mark_email_read_outlined,
+              size: 100,
+              color: AppColors.point,
+            ),
             const SizedBox(height: 24),
             const Text(
               '確認メールを送信しました',
@@ -79,12 +85,12 @@ class _EmailVerificationPendingScreenState extends State<EmailVerificationPendin
             ),
             const SizedBox(height: 16),
             const Text(
-              '届いたメール内のリンクをタップして、\n認証を完了させてください。\n※届かない場合は迷惑メールフォルダも\nご確認ください。',
+              '届いたメール内のリンクをタップ・ボタンをクリックして、認証を完了させてください。\n※届かない場合は迷惑メールフォルダも\nご確認ください。',
               textAlign: TextAlign.center,
               style: TextStyle(color: Colors.black54),
             ),
             const SizedBox(height: 32),
-            
+
             // 認証チェックボタン
             SizedBox(
               width: double.infinity,
@@ -98,9 +104,9 @@ class _EmailVerificationPendingScreenState extends State<EmailVerificationPendin
                 child: const Text('認証を完了しました'),
               ),
             ),
-            
+
             const SizedBox(height: 16),
-            
+
             // 再送ボタン
             TextButton(
               onPressed: _isSending ? null : _resendEmail,

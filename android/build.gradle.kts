@@ -22,3 +22,7 @@ subprojects {
 tasks.register<Delete>("clean") {
     delete(rootProject.layout.buildDirectory)
 }
+
+buildscript {
+    val kotlinVersion = "1.9.0"
+}

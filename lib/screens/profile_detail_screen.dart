@@ -1,11 +1,21 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cached_network_image/cached_network_image.dart'; // ★追加：高機能キャッシュ画像ライブラリ
 import 'package:matching_app/constants/app_colors.dart';
-import 'package:matching_app/main.dart';
-import 'package:matching_app/screens/talk_screen.dart';
+import 'package:matching_app/screens/talk_screen.dart' hide AppColors;
+import 'package:matching_app/screens/subscription_screen.dart'; // 💡 追加：メンバーシップ画面へ遷移させるため
 
 class ProfileDetailScreen extends StatefulWidget {
-  final String userName;
-  const ProfileDetailScreen({super.key, required this.userName});
+  final Map<String, dynamic> userData; // Firestoreからのデータ
+  final String userId; // 相手のID
+
+  const ProfileDetailScreen({
+    super.key,
+    required this.userData,
+    required this.userId,
+  });
 
   @override
   State<ProfileDetailScreen> createState() => _ProfileDetailScreenState();
@@ -16,11 +26,19 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
   int _currentPage = 0;
   bool _isLiked = false;
 
-  final List<Color> _images = [
-    Colors.grey[300]!, Colors.blue[100]!, Colors.green[100]!,
-    Colors.yellow[100]!, Colors.orange[100]!, Colors.purple[100]!,
-    Colors.cyan[100]!, Colors.lime[100]!, Colors.teal[100]!, Colors.pink[100]!,
-  ];
+  // 💡 プラン別制限用の変数群
+  String _myPlan = 'free'; // 'free', 'light', 'standard', etc.
+  int _activeTalkCount = 0;
+  bool _hasChatHistoryWithThisPeer = false;
+  bool _isLoadingLimits = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _addFootprint();
+    _checkLikedStatus();
+    _loadUserPlanAndLimits();
+  }
 
   @override
   void dispose() {
@@ -28,30 +46,267 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
     super.dispose();
   }
 
-  void _nextPage() {
-    if (_currentPage < _images.length - 1) {
-      _pageController.nextPage(duration: const Duration(milliseconds: 300), curve: Curves.easeInOut);
+  // --- ヘルパー：有効な値があるかチェックするロジック ---
+  bool _hasValue(dynamic value) {
+    if (value == null ||
+        value.toString().trim().isEmpty ||
+        value.toString() == '未設定') {
+      return false;
+    }
+    return true;
+  }
+
+  // ==========================================
+  // 💡 プランとトーク人数制限を読み込むバックエンド処理
+  // ==========================================
+  Future<void> _loadUserPlanAndLimits() async {
+    final String? myId = FirebaseAuth.instance.currentUser?.uid;
+    if (myId == null) return;
+
+    try {
+      // 1. 自分の現在のプラン情報を取得
+      final myDoc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(myId)
+          .get();
+      if (myDoc.exists) {
+        _myPlan = myDoc.data()?['plan'] ?? 'free';
+      }
+
+      // 2. 現在アクティブな（メッセージが存在する）トークルームの数を取得
+      final chatRoomsSnapshot = await FirebaseFirestore.instance
+          .collection('chat_rooms')
+          .where('users', arrayContains: myId)
+          .get();
+
+      // lastMessage が入っているアクティブなルーム数をカウント（自分側の非表示 blockedBy は除く）
+      final activeRooms = chatRoomsSnapshot.docs.where((doc) {
+        final chatData = doc.data();
+        final String lastMessage = chatData['lastMessage'] ?? '';
+        final List<dynamic> roomBlockedBy = chatData['blockedBy'] ?? [];
+        return lastMessage.isNotEmpty && !roomBlockedBy.contains(myId);
+      }).toList();
+
+      _activeTalkCount = activeRooms.length;
+
+      // 3. このお相手との個別トーク履歴がすでに存在するかチェック
+      final String chatRoomId = ([myId, widget.userId]..sort()).join("_");
+      final roomDoc = await FirebaseFirestore.instance
+          .collection('chat_rooms')
+          .doc(chatRoomId)
+          .get();
+      if (roomDoc.exists) {
+        final roomData = roomDoc.data();
+        final String lastMessage = roomData?['lastMessage'] ?? '';
+        _hasChatHistoryWithThisPeer = lastMessage.isNotEmpty;
+      }
+
+      if (mounted) {
+        setState(() {
+          _isLoadingLimits = false;
+        });
+      }
+    } catch (e) {
+      debugPrint("プラン制限情報読み込みエラー: $e");
+      if (mounted) {
+        setState(() {
+          _isLoadingLimits = false;
+        });
+      }
     }
   }
 
-  void _previousPage() {
-    if (_currentPage > 0) {
-      _pageController.previousPage(duration: const Duration(milliseconds: 300), curve: Curves.easeInOut);
+  // ==========================================
+  // 💡 新規トーク開始の可否チェック＆遷移
+  // ==========================================
+  void _handleTalkTransition() {
+    final String? myId = FirebaseAuth.instance.currentUser?.uid;
+    if (myId == null) return;
+
+    // 1. 既にメッセージ履歴が存在するトークルーム、または自分自身のプロフィールなら無制限
+    if (_hasChatHistoryWithThisPeer || widget.userId == myId) {
+      _navigateToTalkScreen();
+      return;
     }
+
+    // 2. 新規でチャットを開始する場合の上限人数を取得
+    int allowedLimit = 9999;
+    if (_myPlan == 'free') {
+      allowedLimit = 3; // 💡 フリープランは最大3人まで
+    } else if (_myPlan == 'light') {
+      allowedLimit = 8; // ライトプランは最大8人まで
+    }
+
+    // すでに上限以上の人とチャットしている場合、新規トークをブロックしてサブスクへ誘導
+    if (_activeTalkCount >= allowedLimit) {
+      _showLimitReachedDialog(allowedLimit);
+    } else {
+      _navigateToTalkScreen();
+    }
+  }
+
+  // 枠上限に達した時の誘導アラート
+  void _showLimitReachedDialog(int limit) {
+    String title = "トーク上限に達しました";
+    String content =
+        "現在フリープラン（上限 $limit人）をご利用中のため、これ以上新しい人とトークを始めることができません。\n\n『ライトプラン』や『スタンダードプラン』に登録して、もっとたくさんの友達と会話を楽しみませんか？";
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Text(
+          title,
+          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+        ),
+        content: Text(
+          content,
+          style: const TextStyle(
+            fontSize: 14,
+            height: 1.5,
+            color: Colors.black54,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text(
+              '閉じる',
+              style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold),
+            ),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.point,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+              elevation: 0,
+            ),
+            onPressed: () {
+              Navigator.pop(context); // アラートを閉じる
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const SubscriptionScreen()),
+              );
+            },
+            child: const Text(
+              'プラン一覧を見る',
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _navigateToTalkScreen() {
+    final data = widget.userData;
+    final String imageUrl = (data['imageUrls'] as List? ?? []).isNotEmpty
+        ? data['imageUrls'][0]
+        : 'https://via.placeholder.com/150';
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => TalkScreen(
+          userName: data['name'] ?? '不明',
+          peerId: widget.userId,
+          peerImageUrl: imageUrl,
+        ),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
+    final String? currentUserId = FirebaseAuth.instance.currentUser?.uid;
+    final bool isMyProfile = widget.userId == currentUserId;
+
     final double screenWidth = MediaQuery.of(context).size.width;
+    final int cacheSize =
+        (screenWidth * MediaQuery.of(context).devicePixelRatio).round();
+
     const Color accentPink = Color(0xFFFF8A80);
+    final data = widget.userData;
+    final List<dynamic> imageUrls = data['imageUrls'] ?? [];
+    final Map<String, dynamic> valuesData = Map<String, dynamic>.from(
+      data['values'] ?? {},
+    );
+
+    // --- セクションごとの表示判定用リスト作成 ---
+    final List<Widget> basicInfoTiles = [];
+    if (_hasValue(data['gender']))
+      basicInfoTiles.add(_buildDetailTile(Icons.wc, '性別', data['gender']));
+    if (_hasValue(data['location']))
+      basicInfoTiles.add(
+        _buildDetailTile(Icons.location_on, '居住地', data['location']),
+      );
+    if (_hasValue(data['school']))
+      basicInfoTiles.add(_buildDetailTile(Icons.school, '学校', data['school']));
+    if (_hasValue(data['work']))
+      basicInfoTiles.add(_buildDetailTile(Icons.work, '職業', data['work']));
+    if (_hasValue(data['qualification']))
+      basicInfoTiles.add(
+        _buildDetailTile(Icons.verified, '資格', data['qualification']),
+      );
+    if (_hasValue(data['club']))
+      basicInfoTiles.add(
+        _buildDetailTile(Icons.group, '部活・サークル', data['club']),
+      );
+
+    final List<Widget> hobbyInfoTiles = [];
+    if (_hasValue(data['hobby']))
+      hobbyInfoTiles.add(
+        _buildDetailTile(Icons.interests, '趣味', data['hobby']),
+      );
+    if (_hasValue(data['pet']))
+      hobbyInfoTiles.add(_buildDetailTile(Icons.pets, 'ペット', data['pet']));
+    if (_hasValue(data['anime']))
+      hobbyInfoTiles.add(
+        _buildDetailTile(Icons.movie, '好きなアニメ・漫画', data['anime']),
+      );
+    if (_hasValue(data['artist']))
+      hobbyInfoTiles.add(
+        _buildDetailTile(Icons.music_note, '好きなアーティスト', data['artist']),
+      );
+    if (_hasValue(data['youtube']))
+      hobbyInfoTiles.add(
+        _buildDetailTile(Icons.smart_display, '好きなユーチューバー', data['youtube']),
+      );
+    if (_hasValue(data['game']))
+      hobbyInfoTiles.add(
+        _buildDetailTile(Icons.videogame_asset, '好きなゲーム', data['game']),
+      );
+    if (_hasValue(data['brand']))
+      hobbyInfoTiles.add(
+        _buildDetailTile(Icons.shopping_bag, '好きなブランド', data['brand']),
+      );
+
+    // 💡 フリープランの上限に達しているかどうかを判定
+    final bool isFreeLimitReached =
+        _myPlan == 'free' &&
+        !_hasChatHistoryWithThisPeer &&
+        _activeTalkCount >= 3;
 
     return Scaffold(
       backgroundColor: Colors.white,
       appBar: AppBar(
-        title: const Text('frendy', style: TextStyle(fontWeight: FontWeight.bold)),
+        backgroundColor: Colors.white,
+        title: Text(
+          data['name'] ?? '',
+          style: const TextStyle(
+            fontWeight: FontWeight.bold,
+            color: Colors.black87,
+          ),
+        ),
         centerTitle: true,
         elevation: 0,
-        // backgroundColor: AppColors.blue,
+        iconTheme: const IconThemeData(color: Colors.black87),
       ),
       body: SingleChildScrollView(
         child: Column(
@@ -65,282 +320,493 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
                   height: screenWidth,
                   child: PageView.builder(
                     controller: _pageController,
-                    itemCount: _images.length,
-                    onPageChanged: (index) => setState(() => _currentPage = index),
-                    itemBuilder: (context, index) => Container(
-                      width: screenWidth,
-                      color: _images[index],
-                      child: Center(child: Icon(Icons.image, size: 100, color: Colors.grey[500])),
-                    ),
+                    itemCount: imageUrls.isEmpty ? 1 : imageUrls.length,
+                    onPageChanged: (index) =>
+                        setState(() => _currentPage = index),
+                    itemBuilder: (context, index) {
+                      if (imageUrls.isEmpty) {
+                        return Container(
+                          color: Colors.grey[200],
+                          child: const Icon(
+                            Icons.person,
+                            size: 100,
+                            color: Colors.grey,
+                          ),
+                        );
+                      }
+
+                      return CachedNetworkImage(
+                        imageUrl: imageUrls[index],
+                        fit: BoxFit.cover,
+                        memCacheWidth: cacheSize,
+                        memCacheHeight: cacheSize,
+                        placeholder: (context, url) => Container(
+                          color: Colors.grey[100],
+                          child: Center(
+                            child: SizedBox(
+                              width: 30,
+                              height: 30,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: AppColors.point,
+                              ),
+                            ),
+                          ),
+                        ),
+                        errorWidget: (context, url, error) => Container(
+                          color: Colors.grey[200],
+                          child: const Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(
+                                Icons.broken_image,
+                                size: 50,
+                                color: Colors.grey,
+                              ),
+                              SizedBox(height: 8),
+                              Text(
+                                '画像を読み込めませんでした',
+                                style: TextStyle(
+                                  color: Colors.grey,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
                   ),
                 ),
-                if (_currentPage > 0)
+                if (imageUrls.length > 1)
                   Positioned(
-                    left: 10,
-                    child: CircleAvatar(
-                      backgroundColor: Colors.black45,
-                      child: IconButton(icon: const Icon(Icons.arrow_back_ios_new, color: Colors.white, size: 20), onPressed: _previousPage),
-                    ),
-                  ),
-                if (_currentPage < _images.length - 1)
-                  Positioned(
-                    right: 10,
-                    child: CircleAvatar(
-                      backgroundColor: Colors.black45,
-                      child: IconButton(icon: const Icon(Icons.arrow_forward_ios, color: Colors.white, size: 20), onPressed: _nextPage),
-                    ),
-                  ),
-                Positioned(
-                  bottom: 35, 
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: List.generate(_images.length, (index) => Container(
-                      margin: const EdgeInsets.symmetric(horizontal: 4),
-                      width: 8, height: 8,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle, 
-                        color: _currentPage == index ? AppColors.point : Colors.white70
+                    bottom: 35,
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: List.generate(
+                        imageUrls.length,
+                        (index) => Container(
+                          margin: const EdgeInsets.symmetric(horizontal: 4),
+                          width: 8,
+                          height: 8,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: _currentPage == index
+                                ? AppColors.point
+                                : Colors.white70,
+                          ),
+                        ),
                       ),
-                    )),
+                    ),
                   ),
-                ),
               ],
             ),
 
-            // プロフィール詳細コンテナ
+            // 2. プロフィール詳細エリア
             Container(
               transform: Matrix4.translationValues(0, -20, 0),
               decoration: const BoxDecoration(
                 color: Colors.white,
                 borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
               ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // 基本情報エリア
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 20, 16, 16),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text('ID: 12345678', style: TextStyle(color: Colors.grey[600], fontSize: 14)),
-                        Text('${widget.userName} (24)', style: const TextStyle(fontSize: 26, fontWeight: FontWeight.bold)),
-                        const Text('返信率: 95%', style: TextStyle(color: accentPink, fontWeight: FontWeight.bold)),
-                      ],
-                    ),
-                  ),
+              child: StreamBuilder<DocumentSnapshot>(
+                stream: FirebaseFirestore.instance
+                    .collection('users')
+                    .doc(widget.userId)
+                    .snapshots(),
+                builder: (context, snapshot) {
+                  final peerData = snapshot.hasData
+                      ? snapshot.data!.data() as Map<String, dynamic>
+                      : data;
+                  final int likeCount = peerData['likeCount'] ?? 0;
 
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    child: Wrap(
-                      spacing: 5.0,
-                      runSpacing: 4.0,
-                      children: [
-                        _buildTag('飲み友募集', AppColors.tag),
-                        _buildTag('恋人募集', AppColors.tag),
-                        _buildTag('年齢関係なし', AppColors.tag),
-                        _buildTag('同年代と繋がりたい', AppColors.tag),
-                        _buildTag('性別関係なし', AppColors.tag),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-
-                  // 4. ボタンエリア
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                    child: Column(
-                      children: [
-                        Row(
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 20, 16, 16),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Expanded(
-                              flex: 7,
-                              child: ElevatedButton.icon(
-                                icon: const Icon(Icons.send, size: 18, color: Colors.white), 
-                                label: const Text('トークする', style: TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  color: Colors.white, 
-                                )),
-                                onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => TalkScreen(userName: widget.userName))),
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: AppColors.point,
-                                  padding: const EdgeInsets.symmetric(vertical: 15), 
-                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)), 
-                                  elevation: 2,
-                                ),
+                            InkWell(
+                              onTap: () {
+                                Clipboard.setData(
+                                  ClipboardData(text: widget.userId),
+                                );
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                      'ID: ${widget.userId.substring(0, 8)}... をコピーしました',
+                                    ),
+                                    behavior: SnackBarBehavior.floating,
+                                  ),
+                                );
+                              },
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(
+                                    'ID: ${widget.userId.substring(0, 8)}',
+                                    style: const TextStyle(
+                                      color: Colors.grey,
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 4),
+                                  const Icon(
+                                    Icons.copy,
+                                    size: 14,
+                                    color: Colors.grey,
+                                  ),
+                                ],
                               ),
                             ),
-                            const SizedBox(width: 12),
-                            
-                            Expanded(
-                              flex: 1,
-                              child: OutlinedButton(
-                                onPressed: () {
-                                  setState(() => _isLiked = !_isLiked);
-                                  if (_isLiked) {
-                                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('いいねしました！')));
-                                  }
-                                },
-                                style: OutlinedButton.styleFrom(
-                                  backgroundColor: _isLiked ? accentPink : Colors.transparent,
-                                  foregroundColor: _isLiked ? Colors.white : accentPink,
-                                  padding: const EdgeInsets.symmetric(vertical: 15), 
-                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)), 
-                                  side: const BorderSide(color: accentPink, width: 1.5),
+                            Row(
+                              children: [
+                                Flexible(
+                                  child: Text(
+                                    '${data['name'] ?? ''}${_hasValue(data['age']) ? ' (${data['age']})' : ''}',
+                                    style: const TextStyle(
+                                      fontSize: 26,
+                                      fontWeight: FontWeight.bold,
+                                      height: 1.0,
+                                    ),
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
                                 ),
-                                child: Icon(
-                                  _isLiked ? Icons.thumb_up_alt : Icons.thumb_up_alt_outlined, 
-                                  size: 20
+                                if (_hasValue(data['gender'])) ...[
+                                  const SizedBox(width: 8),
+                                  Builder(
+                                    builder: (context) {
+                                      final gender = data['gender'];
+                                      final Color bgColor = gender == '男性'
+                                          ? Colors.blue.withOpacity(0.15)
+                                          : (gender == '女性'
+                                                ? Colors.pink.withOpacity(0.15)
+                                                : Colors.grey.withOpacity(
+                                                    0.15,
+                                                  ));
+                                      final Color iconColor = gender == '男性'
+                                          ? Colors.blue
+                                          : (gender == '女性'
+                                                ? Colors.pink
+                                                : Colors.grey);
+                                      final IconData iconData = gender == '男性'
+                                          ? Icons.male
+                                          : (gender == '女性'
+                                                ? Icons.female
+                                                : Icons.transgender);
+
+                                      return Container(
+                                        padding: const EdgeInsets.all(4),
+                                        decoration: BoxDecoration(
+                                          color: bgColor,
+                                          shape: BoxShape.circle,
+                                        ),
+                                        child: Icon(
+                                          iconData,
+                                          color: iconColor,
+                                          size: 16,
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                ],
+                                IconButton(
+                                  onPressed: _toggleLike,
+                                  icon: Icon(
+                                    _isLiked
+                                        ? Icons.thumb_up_alt
+                                        : Icons.thumb_up_alt_outlined,
+                                    color: accentPink,
+                                    size: 28,
+                                  ),
+                                  padding: EdgeInsets.zero,
+                                  constraints: const BoxConstraints(),
                                 ),
-                              ),
+                              ],
+                            ),
+                            const SizedBox(height: 8),
+                            Row(
+                              children: [
+                                const Icon(
+                                  Icons.thumb_up,
+                                  color: Colors.pink,
+                                  size: 16,
+                                ),
+                                const SizedBox(width: 4),
+                                Text(
+                                  '${likeCount < 0 ? 0 : likeCount} いいね',
+                                  style: const TextStyle(
+                                    color: Colors.grey,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ],
                             ),
                           ],
                         ),
-                        const SizedBox(height: 12),
-                        SizedBox(
-                          width: double.infinity,
-                          child: _buildFriendRequestButton(AppColors.point),
+                      ),
+                      if (data['tags'] != null &&
+                          (data['tags'] as List).isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          child: Wrap(
+                            spacing: 6.0,
+                            children: (data['tags'] as List)
+                                .map(
+                                  (tag) =>
+                                      _buildTag(tag.toString(), AppColors.tag),
+                                )
+                                .toList(),
+                          ),
+                        ),
+                      if (_hasValue(data['bio'])) ...[
+                        _buildSectionTitle('自己紹介'),
+                        _buildContent(data['bio']),
+                      ],
+                      if (_hasValue(data['interests'])) ...[
+                        _buildSectionTitle('最近ハマってること'),
+                        _buildContent(data['interests']),
+                      ],
+                      if (_hasValue(data['targetFriend'])) ...[
+                        _buildSectionTitle('こんな友達が欲しい'),
+                        _buildContent(data['targetFriend']),
+                      ],
+                      if (basicInfoTiles.isNotEmpty) ...[
+                        _buildSectionTitle('基本情報'),
+                        _buildInfoContainer(basicInfoTiles),
+                      ],
+                      if (hobbyInfoTiles.isNotEmpty) ...[
+                        _buildSectionTitle('趣味・嗜好'),
+                        _buildInfoContainer(hobbyInfoTiles),
+                      ],
+                      if (valuesData.isNotEmpty) ...[
+                        _buildSectionTitle('価値観シート'),
+                        _buildInfoContainer(
+                          valuesData.entries
+                              .map(
+                                (e) => _buildDetailTile(
+                                  Icons.check_circle_outline,
+                                  e.key,
+                                  e.value,
+                                  isValueSheet: true,
+                                ),
+                              )
+                              .toList(),
                         ),
                       ],
-                    ),
-                  ),
-
-                  _buildSectionTitle('自己紹介'),
-                  const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 16),
-                    child: Text(
-                      'こんにちは！山田花子です！今大学生でバイトやサークル活動を行っています。',
-                      style: TextStyle(fontSize: 15, height: 1.5),
-                    ),
-                  ),
-
-                  _buildSectionTitle('ハマってること'),
-                  const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 16),
-                    child: Text(
-                      'アイドルを推すことで、週末ライブにいったりしています！',
-                      style: TextStyle(fontSize: 15, height: 1.5),
-                    ),
-                  ),
-
-                  _buildSectionTitle('こんな友達が欲しい'),
-                  const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 16),
-                    child: Text(
-                      '同じアイドルオタクで、一緒にライブ行ったりできる友達が欲しいです！',
-                      style: TextStyle(fontSize: 15, height: 1.5),
-                    ),
-                  ),
-
-                  // 5. プロフィール欄 (Blue背景)
-                  _buildSectionTitle('プロフィール'),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(vertical: 8),
-                      decoration: BoxDecoration(
-                        color: AppColors.bgblue, 
-                        borderRadius: BorderRadius.circular(15),
-                      ),
-                      child: Column(
-                        children: [
-                          _buildDetailTile(Icons.location_on, '居住地', '東京都'),
-                          _buildDetailTile(Icons.school, '学校', '法政大学（通信）'),
-                          _buildDetailTile(Icons.work, '職業', '三菱重工'),
-                          _buildDetailTile(Icons.verified, '資格', '基本情報技術者、USCPA（勉強中）'),
-                          _buildDetailTile(Icons.group, '部活・サークル', 'テニス、プログラミング部'),
-                        ],
-                      ),
-                    ),
-                  ),
-
-                  // 6. その他プロフィール欄 (Pink背景)
-                  _buildSectionTitle('その他プロフィール'),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(vertical: 8),
-                      decoration: BoxDecoration(
-                        color: AppColors.bgblue, // Pinkを薄めた色
-                        borderRadius: BorderRadius.circular(15),
-                      ),
-                      child: Column(
-                        children: [
-                          _buildDetailTile(Icons.interests, '趣味', 'サウナ、海外旅行、読書'),
-                          _buildDetailTile(Icons.pets, 'ペット', 'トイプードル'),
-                          _buildDetailTile(Icons.movie, '好きなアニメ・漫画', '葬送のフリーレン、キングダム'),
-                          _buildDetailTile(Icons.music_note, '好きなアーティスト', 'Official髭男dism、Vaundy'),
-                          _buildDetailTile(Icons.smart_display, '好きなユーチューバー', '中田敦彦のYouTube大学'),
-                          _buildDetailTile(Icons.videogame_asset, '好きなゲーム', 'ゼルダの伝説、原神'),
-                          _buildDetailTile(Icons.shopping_bag, '好きなブランド', 'UNIQLO、Apple'),
-                        ],
-                      ),
-                    ),
-                  ),
-
-                  const SizedBox(height: 50),
-                ],
+                      const SizedBox(height: 20),
+                    ],
+                  );
+                },
               ),
             ),
           ],
         ),
       ),
+      bottomNavigationBar: Container(
+        padding: const EdgeInsets.fromLTRB(15, 25, 15, 0),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.05),
+              blurRadius: 10,
+              offset: const Offset(0, -5),
+            ),
+          ],
+        ),
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(15, 0, 15, 0),
+            child: SizedBox(
+              width: double.infinity,
+              height: 54,
+              // 💡 人数情報をロード中はインジケータ等を表示、完了したらプラン別制限判定付きのボタンを表示
+              child: _isLoadingLimits
+                  ? const Center(child: CircularProgressIndicator())
+                  : ElevatedButton.icon(
+                      icon: const Icon(Icons.send, color: Colors.white),
+                      label: Text(
+                        isFreeLimitReached ? 'トーク上限に達しました' : 'トークする',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                        ),
+                      ),
+                      // 💡 1. 自分のプロフィールならボタン無効
+                      // 💡 2. フリープランかつ新規相手で3人制限に達している場合はボタンを完全に無効化（グレーアウト）
+                      onPressed: isMyProfile
+                          ? null
+                          : (isFreeLimitReached
+                                ? () =>
+                                      _showLimitReachedDialog(
+                                        3,
+                                      ) // タップ時にプラン案内ダイアログを表示
+                                : _handleTalkTransition), // 正常時
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: isFreeLimitReached
+                            ? Colors.grey[400]
+                            : AppColors.point,
+                        elevation: 0,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(30),
+                        ),
+                      ),
+                    ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 
-  // --- ヘルパー関数 ---
-  // (変更なしのため省略可能ですが、そのままお使いいただけます)
-
-  Widget _buildTag(String label, Color color) {
-    return Chip(
-      label: Text(label, style: TextStyle(fontSize: 12, color: color)),
-      backgroundColor: Colors.white,
-      side: BorderSide(color: color, width: 0.5),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-      visualDensity: VisualDensity.compact,
-    );
-  }
+  // --- ヘルパーメソッド群 ---
 
   Widget _buildSectionTitle(String title) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 24, 16, 8),
-      child: Text(title, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-    );
-  }
-
-  Widget _buildDetailTile(IconData icon, String label, String value) {
-    return ListTile(
-      leading: Icon(icon, color: Colors.blueGrey),
-      title: Text(label, style: const TextStyle(fontSize: 14, color: Color.fromARGB(174, 0, 0, 0))),
-      subtitle: Text(value, style: const TextStyle(fontSize: 16, color: Colors.black)),
-      dense: true,
-    );
-  }
-
-  Widget _buildFriendRequestButton(Color color) {
-    int messageCount = 2; 
-    int requiredCount = 3;
-    bool canRequest = messageCount >= requiredCount;
-
-    return ElevatedButton.icon(
-      onPressed: canRequest ? () {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('友達申請を送りました！')));
-      } : null,
-      icon: Icon(Icons.person_add, size: 18, color: canRequest ? color : Colors.grey),
-      label: Text(
-        canRequest ? '友達申請' : 'あと${requiredCount - messageCount}通で友達申請可能', 
-        style: TextStyle(fontSize: 12, color: canRequest ? color : Colors.grey)
+      child: Text(
+        title,
+        style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
       ),
-      style: ElevatedButton.styleFrom(
-        backgroundColor: canRequest ? Colors.white : Colors.grey[100],
-        foregroundColor: color,
-        elevation: canRequest ? 1 : 0,
-        padding: const EdgeInsets.symmetric(vertical: 15),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(10),
-          side: canRequest ? BorderSide(color: color) : BorderSide.none,
+    );
+  }
+
+  Widget _buildContent(dynamic text) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Text(
+        text.toString(),
+        style: const TextStyle(
+          fontSize: 15,
+          height: 1.5,
+          color: Colors.black87,
         ),
       ),
     );
+  }
+
+  Widget _buildInfoContainer(List<Widget> children) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(0, 8, 0, 16),
+        decoration: BoxDecoration(
+          color: AppColors.gley,
+          borderRadius: BorderRadius.circular(15),
+        ),
+        child: Column(children: children),
+      ),
+    );
+  }
+
+  Widget _buildDetailTile(
+    IconData icon,
+    String label,
+    dynamic value, {
+    bool isValueSheet = false,
+  }) {
+    return ListTile(
+      visualDensity: const VisualDensity(horizontal: 0, vertical: -4),
+      minVerticalPadding: 0,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 0),
+      leading: Icon(icon, color: Colors.blueGrey, size: 20),
+      title: Text(
+        label,
+        style: const TextStyle(fontSize: 13, color: AppColors.txt),
+      ),
+      subtitle: Text(
+        value.toString(),
+        style: TextStyle(
+          fontSize: 15,
+          fontWeight: isValueSheet ? FontWeight.bold : FontWeight.w500,
+          color: isValueSheet ? AppColors.txt : Colors.black87,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTag(String label, Color color) {
+    return Chip(
+      label: Text(label, style: TextStyle(fontSize: 13, color: color)),
+      backgroundColor: Colors.white,
+      side: BorderSide(color: color, width: 0.5),
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+    );
+  }
+
+  // --- バックエンド処理 ---
+
+  Future<void> _addFootprint() async {
+    final String? myId = FirebaseAuth.instance.currentUser?.uid;
+    final String peerId = widget.userId;
+    if (myId == null || myId == peerId) return;
+
+    try {
+      final peerDoc = FirebaseFirestore.instance
+          .collection('users')
+          .doc(peerId);
+      await peerDoc.update({
+        'footprints': FieldValue.arrayUnion([myId]),
+      });
+    } catch (e) {
+      debugPrint('足跡の記録に失敗しました: $e');
+    }
+  }
+
+  Future<void> _checkLikedStatus() async {
+    final String? myId = FirebaseAuth.instance.currentUser?.uid;
+    if (myId == null) return;
+
+    final myDoc = await FirebaseFirestore.instance
+        .collection('users')
+        .doc(myId)
+        .get();
+    final List<dynamic> myLikes = myDoc.data()?['likes'] ?? [];
+
+    if (mounted) {
+      setState(() {
+        _isLiked = myLikes.contains(widget.userId);
+      });
+    }
+  }
+
+  Future<void> _toggleLike() async {
+    final String myId = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final String peerId = widget.userId;
+    final String? currentUserId = FirebaseAuth.instance.currentUser?.uid;
+    final bool isMyProfile = widget.userId == currentUserId;
+    if (myId.isEmpty || isMyProfile) return;
+
+    setState(() => _isLiked = !_isLiked);
+
+    final batch = FirebaseFirestore.instance.batch();
+    final myDoc = FirebaseFirestore.instance.collection('users').doc(myId);
+    final peerDoc = FirebaseFirestore.instance.collection('users').doc(peerId);
+
+    if (_isLiked) {
+      batch.update(myDoc, {
+        'likes': FieldValue.arrayUnion([peerId]),
+      });
+      batch.update(peerDoc, {
+        'likedBy': FieldValue.arrayUnion([myId]),
+        'likeCount': FieldValue.increment(1),
+      });
+    } else {
+      batch.update(myDoc, {
+        'likes': FieldValue.arrayRemove([peerId]),
+      });
+      batch.update(peerDoc, {
+        'likedBy': FieldValue.arrayRemove([myId]),
+        'likeCount': FieldValue.increment(-1),
+      });
+    }
+    await batch.commit();
   }
 }
