@@ -22,18 +22,8 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
   final _locationController = TextEditingController();
   final _schoolController = TextEditingController();
   final _workController = TextEditingController();
-  final _qualificationController = TextEditingController();
-  final _clubController = TextEditingController();
-  final _hobbyController = TextEditingController();
-  final _petController = TextEditingController();
-  final _animeController = TextEditingController();
-  final _artistController = TextEditingController();
-  final _youtubeController = TextEditingController();
-  final _gameController = TextEditingController();
-  final _brandController = TextEditingController();
-  final _bioController = TextEditingController();
-  final _interestsController = TextEditingController();
-  final _targetFriendController = TextEditingController();
+  final _bioController = TextEditingController(); // 自己紹介 (任意)
+  final _hobbyController = TextEditingController(); // 趣味・好きなこと (必須に変更)
 
   // --- 画像・タグ関連 ---
   final List<dynamic> _displayImages = List.filled(10, null);
@@ -46,6 +36,8 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
     '推し活仲間募集',
     'ライブ仲間募集',
     '趣味仲間募集',
+    'アウトドアな人募集',
+    'インドアな人募集',
     'ご飯屋行きたい',
     'カフェ行きたい',
     '恋人募集',
@@ -58,14 +50,15 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
 
   Map<String, String> _myValues = {};
 
+  // 💡 ライフスタイルに関する質問（任意のままでOK！）
   final Map<String, List<String>> _valueSheetQuestions = {
+    'お休みの日': ['土日祝休み', '平日休み', 'シフト・不定休', '夜勤メイン'],
+    '会うまでの希望': ['まずはメッセージから', 'まずは通話から', '気が合えば会いたい', '気軽にすぐ会いたい'],
+    'お酒について': ['よく飲む', 'ときどき飲む', 'お付き合い程度', '全く飲まない'],
+    'フットワーク': ['フッ軽（誘われればすぐ行く）', '予定をあらかじめ立てたい', '基本インドア'],
     '趣味にかけるお金の割合': ['給料の全て', '上限を決めている', 'お小遣いの範囲で'],
-    'イベントへの遠征': ['全国どこでも行く', '地方まで', '地元の現場のみ', '在宅メイン'],
-    '趣味・推し活のグッズ購入': ['コンプリートしたい', '厳選して買う', '基本買わない'],
-    '自分へのご褒美の頻度': ['毎月買う', '期間限定に弱い', '大きなイベント後だけ', '滅多に買わない'],
     '旅行・遠征の宿選び': ['寝れればOK（格安）', '立地重視（ビジホ）', '宿自体を楽しむ（ホテル・旅館）'],
     '理想の連絡頻度': ['毎日たくさん', '一日数回', '用事があるときだけ', '通話派'],
-    '初対面で会う時のハードル': ['まずはカフェで', '最初から一日お出かけ', 'まずは通話から'],
   };
 
   final OutlineInputBorder _greyBorderStyle = OutlineInputBorder(
@@ -96,20 +89,12 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
         _locationController.text = data['location'] ?? '';
         _schoolController.text = data['school'] ?? '';
         _workController.text = data['work'] ?? '';
-        _qualificationController.text = data['qualification'] ?? '';
-        _clubController.text = data['club'] ?? '';
         _hobbyController.text = data['hobby'] ?? '';
-        _petController.text = data['pet'] ?? '';
-        _animeController.text = data['anime'] ?? '';
-        _artistController.text = data['artist'] ?? '';
-        _youtubeController.text = data['youtube'] ?? '';
-        _gameController.text = data['game'] ?? '';
-        _brandController.text = data['brand'] ?? '';
         _bioController.text = data['bio'] ?? '';
-        _interestsController.text = data['interests'] ?? '';
-        _targetFriendController.text = data['targetFriend'] ?? '';
-        if (data['tags'] != null)
+
+        if (data['tags'] != null) {
           _selectedTags = List<String>.from(data['tags']);
+        }
 
         _selectedGender = data['gender'] ?? '男性';
         if (data['values'] != null) {
@@ -140,36 +125,26 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
     setState(() => _displayImages[index] = null);
   }
 
-  // --- バリデーション（必須項目のチェック） ---
+  // --- バリデーション（趣味・好きなものを「必須」に戻しました！） ---
   bool _validateInputs() {
     if (_nameController.text.trim().isEmpty) return _showError('名前を入力してください');
     if (_ageController.text.trim().isEmpty) return _showError('年齢を入力してください');
     if (_locationController.text.trim().isEmpty)
       return _showError('居住地を入力してください');
 
-    if (_hobbyController.text.trim().isEmpty) return _showError('趣味を入力してください');
-    if (_petController.text.trim().isEmpty) return _showError('ペットを入力してください');
-    if (_animeController.text.trim().isEmpty)
-      return _showError('好きなアニメ・漫画を入力してください');
-    if (_artistController.text.trim().isEmpty)
-      return _showError('好きなアーティストを入力してください');
-    if (_youtubeController.text.trim().isEmpty)
-      return _showError('好きなYouTuberを入力してください');
-    if (_gameController.text.trim().isEmpty)
-      return _showError('好きなゲームを入力してください');
-    if (_brandController.text.trim().isEmpty)
-      return _showError('好きなブランドを入力してください');
+    // 💡 趣味・好きなものを必須チェックに再追加！
+    if (_hobbyController.text.trim().isEmpty)
+      return _showError('趣味・好きなものを入力してください');
 
-    if (_bioController.text.trim().isEmpty) return _showError('自己紹介を入力してください');
-    if (_interestsController.text.trim().isEmpty)
-      return _showError('最近ハマってることを入力してください');
-    if (_targetFriendController.text.trim().isEmpty)
-      return _showError('どんな友達が欲しいか入力してください');
-
-    if (_displayImages.every((img) => img == null))
+    // 画像は最低1枚
+    if (_displayImages.every((img) => img == null)) {
       return _showError('写真を1枚以上設定してください');
-    if (int.tryParse(_ageController.text.trim()) == null)
+    }
+
+    // 年齢数値チェック
+    if (int.tryParse(_ageController.text.trim()) == null) {
       return _showError('年齢は数字で入力してください');
+    }
 
     return true;
   }
@@ -179,6 +154,18 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
       SnackBar(content: Text(message), backgroundColor: Colors.redAccent),
     );
     return false;
+  }
+
+  // 💡 簡単自己紹介テンプレート機能
+  void _applyBioTemplate() {
+    setState(() {
+      _bioController.text =
+          "はじめまして！プロフィールを見ていただきありがとうございます✨\n\n"
+          "普段は ${_locationController.text.isNotEmpty ? _locationController.text : '都内'} で ${_workController.text.isNotEmpty ? _workController.text : '会社員'} をしています。\n"
+          "休日はカフェを巡ったり、まったり映画を観たりして過ごすことが多いです。☕\n"
+          "最近は新しくサウナや旅行にも興味を持ち始めています。♨️\n\n"
+          "共通の趣味やお互いの好きなことなど、いろいろまったりたくさんお話しできたら嬉しいです！よろしくお願いします！";
+    });
   }
 
   Future<void> _saveProfile() async {
@@ -203,6 +190,7 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
           Reference storageRef = FirebaseStorage.instanceFor(
             bucket: 'gs://frendy-app-project.firebasestorage.app',
           ).ref().child('user_images/${user.uid}/$fileName');
+
           Uint8List fileBytes = await item.readAsBytes();
           UploadTask uploadTask = storageRef.putData(
             fileBytes,
@@ -222,18 +210,8 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
         'location': _locationController.text.trim(),
         'school': _schoolController.text.trim(),
         'work': _workController.text.trim(),
-        'qualification': _qualificationController.text.trim(),
-        'club': _clubController.text.trim(),
         'hobby': _hobbyController.text.trim(),
-        'pet': _petController.text.trim(),
-        'anime': _animeController.text.trim(),
-        'artist': _artistController.text.trim(),
-        'youtube': _youtubeController.text.trim(),
-        'game': _gameController.text.trim(),
-        'brand': _brandController.text.trim(),
         'bio': _bioController.text.trim(),
-        'interests': _interestsController.text.trim(),
-        'targetFriend': _targetFriendController.text.trim(),
         'tags': _selectedTags,
         'imageUrls': finalUrls,
         'updatedAt': Timestamp.now(),
@@ -252,10 +230,11 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
         Navigator.pop(context);
       }
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('エラー: $e')));
+      }
       print('$e');
     } finally {
       if (mounted) setState(() => _isLoading = false);
@@ -284,18 +263,8 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
                   'location': _locationController.text,
                   'school': _schoolController.text,
                   'work': _workController.text,
-                  'qualification': _qualificationController.text,
-                  'club': _clubController.text,
                   'hobby': _hobbyController.text,
-                  'pet': _petController.text,
-                  'anime': _animeController.text,
-                  'artist': _artistController.text,
-                  'youtube': _youtubeController.text,
-                  'game': _gameController.text,
-                  'brand': _brandController.text,
                   'bio': _bioController.text,
-                  'interests': _interestsController.text,
-                  'targetFriend': _targetFriendController.text,
                   'tags': _selectedTags,
                   'imageUrls': _displayImages,
                   'gender': _selectedGender,
@@ -344,10 +313,12 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
                 children: [
                   _buildSectionTitle('プロフィール写真（最大10枚）*'),
                   _buildImageSection(),
+
                   _buildSectionTitle('タグ（5個まで選択可）'),
                   _buildTagSection(),
+
                   _buildSectionTitle('基本情報（必須）'),
-                  _buildGenderRadioSection(), // 統一感を持たせた性別選択
+                  _buildGenderRadioSection(),
                   _buildTextField(_nameController, '名前 *', Icons.person),
                   _buildTextField(
                     _ageController,
@@ -357,54 +328,49 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
                   ),
                   _buildLocationControllerField(),
 
-                  _buildSectionTitle('趣味・嗜好（必須）'),
-                  _buildTextField(_hobbyController, '趣味 *', Icons.interests),
-                  _buildTextField(_petController, 'ペット *', Icons.pets),
-                  _buildTextField(_animeController, '好きなアニメ・漫画 *', Icons.movie),
-                  _buildTextField(
-                    _artistController,
-                    '好きなアーティスト *',
-                    Icons.music_note,
-                  ),
-                  _buildTextField(
-                    _youtubeController,
-                    '好きなYouTuber *',
-                    Icons.smart_display,
-                  ),
-                  _buildTextField(
-                    _gameController,
-                    '好きなゲーム *',
-                    Icons.videogame_asset,
-                  ),
-                  _buildTextField(
-                    _brandController,
-                    '好きなブランド *',
-                    Icons.shopping_bag,
-                  ),
-
-                  _buildSectionTitle('自己紹介 *'),
-                  _buildMultiLineField(_bioController, '自由に書きましょう！'),
-                  _buildSectionTitle('最近ハマってること *'),
-                  _buildMultiLineField(_interestsController, '例：サウナ、カフェ巡りなど'),
-                  _buildSectionTitle('こんな友達が欲しい *'),
-                  _buildMultiLineField(
-                    _targetFriendController,
-                    '例：一緒にライブに行ける人など',
-                  ),
-
-                  // ⭕ モーダルではなく通常表示の価値観シート
-                  _buildSectionTitle('価値観シート（任意）'),
-                  _buildInlineValueSheet(),
-
-                  _buildSectionTitle('基本情報（任意）'),
+                  _buildSectionTitle('基本プロフィール（任意）'),
                   _buildTextField(_schoolController, '学校', Icons.school),
                   _buildTextField(_workController, '職業', Icons.work),
+
+                  // 💡 趣味・好きなものを必須に変更（アスタリスク * を追加）
+                  _buildSectionTitle('趣味・好きなもの（必須）*'),
                   _buildTextField(
-                    _qualificationController,
-                    '資格',
-                    Icons.verified,
+                    _hobbyController,
+                    '趣味、好きなゲームやブランドなど自由に入力 *',
+                    Icons.interests,
                   ),
-                  _buildTextField(_clubController, '部活・サークル', Icons.group),
+
+                  // 自己紹介（任意・ワンタップ入力補助つき）
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      _buildSectionTitle('自己紹介文（任意）'),
+                      TextButton.icon(
+                        onPressed: _applyBioTemplate,
+                        icon: const Icon(
+                          Icons.auto_awesome,
+                          size: 16,
+                          color: AppColors.point,
+                        ),
+                        label: const Text(
+                          'テンプレート入力',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: AppColors.point,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  _buildMultiLineField(
+                    _bioController,
+                    '休日の過ごし方や、好きな音楽、よく観るYouTubeなどを自由に書きましょう！',
+                  ),
+
+                  // 💡 ライフスタイル・価値観シート（任意のままでOK！）
+                  _buildSectionTitle('ライフスタイル・価値観シート（任意）'),
+                  _buildInlineValueSheet(),
 
                   const SizedBox(height: 50),
                 ],
@@ -503,7 +469,7 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
       child: Text(
         title,
         style: const TextStyle(
-          fontSize: 18,
+          fontSize: 16,
           fontWeight: FontWeight.bold,
           color: AppColors.appbarText,
         ),
@@ -548,12 +514,10 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
     );
   }
 
-  // ⭕ 他の入力欄と縦幅・デザインを完全に統一した性別選択UI
   Widget _buildGenderRadioSection() {
     return Padding(
       padding: const EdgeInsets.only(bottom: 12.0),
       child: InputDecorator(
-        // 他のTextFieldと縦幅の見た目を揃えるために contentPadding を調整
         decoration: InputDecoration(
           labelText: '性別 *',
           prefixIcon: const Icon(Icons.wc, color: Colors.grey),
@@ -576,9 +540,8 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
                 labelStyle: TextStyle(
                   color: isSelected ? AppColors.point : Colors.black87,
                   fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-                  fontSize: 13, // 枠内にきれいに収まるよう文字サイズをわずかに調整
+                  fontSize: 13,
                 ),
-                // チップ自体の余白を詰めて縦幅をTextFieldに合わせる
                 padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 0),
                 materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                 shape: RoundedRectangleBorder(
@@ -601,7 +564,6 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
     );
   }
 
-  // ⭕ インライン形式（画面内そのまま表示）の価値観シートUI
   Widget _buildInlineValueSheet() {
     return Container(
       width: double.infinity,
@@ -670,6 +632,8 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
                         setState(() {
                           if (selected) {
                             _myValues[question] = option;
+                          } else {
+                            _myValues.remove(question);
                           }
                         });
                       },
@@ -691,18 +655,8 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
     _locationController.dispose();
     _schoolController.dispose();
     _workController.dispose();
-    _qualificationController.dispose();
-    _clubController.dispose();
     _hobbyController.dispose();
-    _petController.dispose();
-    _animeController.dispose();
-    _artistController.dispose();
-    _youtubeController.dispose();
-    _gameController.dispose();
-    _brandController.dispose();
     _bioController.dispose();
-    _interestsController.dispose();
-    _targetFriendController.dispose();
     super.dispose();
   }
 }

@@ -54,67 +54,28 @@ class _ProfilePreviewScreenState extends State<ProfilePreviewScreen> {
     );
 
     // --- セクションごとの表示判定用リスト作成 ---
-    // 1. 基本情報のリスト
+    // 💡 削除された不要な項目（資格・サークルなど）を排除し、本当に必要な項目にスリム化！
     final List<Widget> basicInfoTiles = [];
-    if (_hasValue(widget.data['gender']))
+    if (_hasValue(widget.data['gender'])) {
       basicInfoTiles.add(
         _buildDetailTile(Icons.wc, '性別', widget.data['gender']),
       );
-    if (_hasValue(widget.data['location']))
+    }
+    if (_hasValue(widget.data['location'])) {
       basicInfoTiles.add(
         _buildDetailTile(Icons.location_on, '居住地', widget.data['location']),
       );
-    if (_hasValue(widget.data['school']))
+    }
+    if (_hasValue(widget.data['school'])) {
       basicInfoTiles.add(
         _buildDetailTile(Icons.school, '学校', widget.data['school']),
       );
-    if (_hasValue(widget.data['work']))
+    }
+    if (_hasValue(widget.data['work'])) {
       basicInfoTiles.add(
         _buildDetailTile(Icons.work, '職業', widget.data['work']),
       );
-    if (_hasValue(widget.data['qualification']))
-      basicInfoTiles.add(
-        _buildDetailTile(Icons.verified, '資格', widget.data['qualification']),
-      );
-    if (_hasValue(widget.data['club']))
-      basicInfoTiles.add(
-        _buildDetailTile(Icons.group, '部活・サークル', widget.data['club']),
-      );
-
-    // 2. 趣味・嗜好のリスト
-    final List<Widget> hobbyInfoTiles = [];
-    if (_hasValue(widget.data['hobby']))
-      hobbyInfoTiles.add(
-        _buildDetailTile(Icons.interests, '趣味', widget.data['hobby']),
-      );
-    if (_hasValue(widget.data['pet']))
-      hobbyInfoTiles.add(
-        _buildDetailTile(Icons.pets, 'ペット', widget.data['pet']),
-      );
-    if (_hasValue(widget.data['anime']))
-      hobbyInfoTiles.add(
-        _buildDetailTile(Icons.movie, '好きなアニメ・漫画', widget.data['anime']),
-      );
-    if (_hasValue(widget.data['artist']))
-      hobbyInfoTiles.add(
-        _buildDetailTile(Icons.music_note, '好きなアーティスト', widget.data['artist']),
-      );
-    if (_hasValue(widget.data['youtube']))
-      hobbyInfoTiles.add(
-        _buildDetailTile(
-          Icons.smart_display,
-          '好きなユーチューバー',
-          widget.data['youtube'],
-        ),
-      );
-    if (_hasValue(widget.data['game']))
-      hobbyInfoTiles.add(
-        _buildDetailTile(Icons.videogame_asset, '好きなゲーム', widget.data['game']),
-      );
-    if (_hasValue(widget.data['brand']))
-      hobbyInfoTiles.add(
-        _buildDetailTile(Icons.shopping_bag, '好きなブランド', widget.data['brand']),
-      );
+    }
 
     return Scaffold(
       backgroundColor: Colors.white,
@@ -327,16 +288,10 @@ class _ProfilePreviewScreenState extends State<ProfilePreviewScreen> {
                     _buildContent(widget.data['bio']),
                   ],
 
-                  // 最近ハマってること
-                  if (_hasValue(widget.data['interests'])) ...[
-                    _buildSectionTitle('最近ハマってること'),
-                    _buildContent(widget.data['interests']),
-                  ],
-
-                  // こんな友達が欲しい
-                  if (_hasValue(widget.data['targetFriend'])) ...[
-                    _buildSectionTitle('こんな友達が欲しい'),
-                    _buildContent(widget.data['targetFriend']),
+                  // 💡 趣味・好きなもの（必須項目化に伴い、こちらにも綺麗に表示されるように最適化！）
+                  if (_hasValue(widget.data['hobby'])) ...[
+                    _buildSectionTitle('趣味・好きなもの'),
+                    _buildContent(widget.data['hobby']),
                   ],
 
                   // 基本情報
@@ -345,15 +300,9 @@ class _ProfilePreviewScreenState extends State<ProfilePreviewScreen> {
                     _buildInfoContainer(basicInfoTiles),
                   ],
 
-                  // 趣味・嗜好
-                  if (hobbyInfoTiles.isNotEmpty) ...[
-                    _buildSectionTitle('趣味・嗜好'),
-                    _buildInfoContainer(hobbyInfoTiles),
-                  ],
-
-                  // ⭕ 一番下に追加：価値観シート（プレビュー用）
+                  // 💡 ライフスタイル・価値観シート
                   if (valuesData.isNotEmpty) ...[
-                    _buildSectionTitle('価値観シート'),
+                    _buildSectionTitle('ライフスタイル・価値観シート'),
                     _buildInfoContainer(
                       valuesData.entries.map((entry) {
                         return _buildDetailTile(

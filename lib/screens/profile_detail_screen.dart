@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -50,7 +51,8 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
   bool _hasValue(dynamic value) {
     if (value == null ||
         value.toString().trim().isEmpty ||
-        value.toString() == '未設定') {
+        value.toString() == '未設定' ||
+        value.toString() == '未入力') {
       return false;
     }
     return true;
@@ -239,53 +241,22 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
     );
 
     // --- セクションごとの表示判定用リスト作成 ---
+    // 💡 不要な項目（資格・部活・サークルなど）を排除し、本当に必要な項目にスリム化！
     final List<Widget> basicInfoTiles = [];
-    if (_hasValue(data['gender']))
+    if (_hasValue(data['gender'])) {
       basicInfoTiles.add(_buildDetailTile(Icons.wc, '性別', data['gender']));
-    if (_hasValue(data['location']))
+    }
+    if (_hasValue(data['location'])) {
       basicInfoTiles.add(
         _buildDetailTile(Icons.location_on, '居住地', data['location']),
       );
-    if (_hasValue(data['school']))
+    }
+    if (_hasValue(data['school'])) {
       basicInfoTiles.add(_buildDetailTile(Icons.school, '学校', data['school']));
-    if (_hasValue(data['work']))
+    }
+    if (_hasValue(data['work'])) {
       basicInfoTiles.add(_buildDetailTile(Icons.work, '職業', data['work']));
-    if (_hasValue(data['qualification']))
-      basicInfoTiles.add(
-        _buildDetailTile(Icons.verified, '資格', data['qualification']),
-      );
-    if (_hasValue(data['club']))
-      basicInfoTiles.add(
-        _buildDetailTile(Icons.group, '部活・サークル', data['club']),
-      );
-
-    final List<Widget> hobbyInfoTiles = [];
-    if (_hasValue(data['hobby']))
-      hobbyInfoTiles.add(
-        _buildDetailTile(Icons.interests, '趣味', data['hobby']),
-      );
-    if (_hasValue(data['pet']))
-      hobbyInfoTiles.add(_buildDetailTile(Icons.pets, 'ペット', data['pet']));
-    if (_hasValue(data['anime']))
-      hobbyInfoTiles.add(
-        _buildDetailTile(Icons.movie, '好きなアニメ・漫画', data['anime']),
-      );
-    if (_hasValue(data['artist']))
-      hobbyInfoTiles.add(
-        _buildDetailTile(Icons.music_note, '好きなアーティスト', data['artist']),
-      );
-    if (_hasValue(data['youtube']))
-      hobbyInfoTiles.add(
-        _buildDetailTile(Icons.smart_display, '好きなユーチューバー', data['youtube']),
-      );
-    if (_hasValue(data['game']))
-      hobbyInfoTiles.add(
-        _buildDetailTile(Icons.videogame_asset, '好きなゲーム', data['game']),
-      );
-    if (_hasValue(data['brand']))
-      hobbyInfoTiles.add(
-        _buildDetailTile(Icons.shopping_bag, '好きなブランド', data['brand']),
-      );
+    }
 
     // 💡 フリープランの上限に達しているかどうかを判定
     final bool isFreeLimitReached =
@@ -312,7 +283,7 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // 1. 画像エリア
+            // 1. 画像エリア（キャッシュ画像最適化）
             Stack(
               alignment: Alignment.center,
               children: [
@@ -567,24 +538,22 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
                         _buildSectionTitle('自己紹介'),
                         _buildContent(data['bio']),
                       ],
-                      if (_hasValue(data['interests'])) ...[
-                        _buildSectionTitle('最近ハマってること'),
-                        _buildContent(data['interests']),
+
+                      // 💡 趣味・好きなもの（必須項目・統合化に合わせてテキスト形式で美しく表示）
+                      if (_hasValue(data['hobby'])) ...[
+                        _buildSectionTitle('趣味・好きなもの'),
+                        _buildContent(data['hobby']),
                       ],
-                      if (_hasValue(data['targetFriend'])) ...[
-                        _buildSectionTitle('こんな友達が欲しい'),
-                        _buildContent(data['targetFriend']),
-                      ],
+
+                      // 基本情報 (性別、居住地、学校、職業)
                       if (basicInfoTiles.isNotEmpty) ...[
                         _buildSectionTitle('基本情報'),
                         _buildInfoContainer(basicInfoTiles),
                       ],
-                      if (hobbyInfoTiles.isNotEmpty) ...[
-                        _buildSectionTitle('趣味・嗜好'),
-                        _buildInfoContainer(hobbyInfoTiles),
-                      ],
+
+                      // 💡 ライフスタイル・価値観シート
                       if (valuesData.isNotEmpty) ...[
-                        _buildSectionTitle('価値観シート'),
+                        _buildSectionTitle('ライフスタイル・価値観シート'),
                         _buildInfoContainer(
                           valuesData.entries
                               .map(
@@ -665,8 +634,7 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
     );
   }
 
-  // --- ヘルパーメソッド群 ---
-
+  // --- ヘルパー関数 ---
   Widget _buildSectionTitle(String title) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 24, 16, 8),
@@ -725,7 +693,9 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
         style: TextStyle(
           fontSize: 15,
           fontWeight: isValueSheet ? FontWeight.bold : FontWeight.w500,
-          color: isValueSheet ? AppColors.txt : Colors.black87,
+          color: isValueSheet
+              ? AppColors.point
+              : Colors.black87, // 💡 価値観シート用カラー調整
         ),
       ),
     );
