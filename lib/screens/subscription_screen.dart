@@ -9,34 +9,45 @@ class SubscriptionScreen extends StatefulWidget {
 }
 
 class _SubscriptionScreenState extends State<SubscriptionScreen> {
-  // 💡 デフォルト選択を「スタンダード」（インデックス: 1）に変更
+  // 💡 デフォルト選択を「ライト」（インデックス: 1）に変更
   int _selectedPlanIndex = 1;
 
   @override
   Widget build(BuildContext context) {
     const String currentPlan = 'free';
 
-    // 💡 プラン名を修正＆人気プランをスタンダードに設定
+    // 💡 フリープランを追加し、各プランの内容・価格を修正
     final List<Map<String, dynamic>> plans = [
+      {
+        'id': 'free',
+        'name': 'フリー',
+        'price': '0',
+        'features': [
+          {'title': 'メッセージ最大5人まで', 'desc': '最大5人の気になる相手と会話を始めることができます。'},
+        ],
+        'color': Colors.grey,
+      },
       {
         'id': 'light',
         'name': 'ライト',
         'price': '250',
         'features': [
-          {'title': 'メッセージ最大8人まで', 'desc': '最大8人の気になる相手と会話を始めることができます。'},
+          {'title': 'メッセージ最大15人まで', 'desc': '最大15人の気になる相手と会話を始めることができます。'},
+          {'title': '足跡の表示', 'desc': 'あなたのプロフィールを見た人がわかります。'},
         ],
         'color': const Color(0xFFFF9800), // オレンジ
       },
       {
         'id': 'standard',
         'name': 'スタンダード',
-        'price': '480',
+        'price': '500',
         'features': [
           {'title': 'メッセージ無制限', 'desc': '気になる相手といつでも会話できます。'},
           {'title': '足跡の表示', 'desc': 'あなたのプロフィールを見た人がわかります。'},
+          {'title': 'いいねされた人を見れる', 'desc': 'あなたにいいねしたお相手を確認できます。'},
         ],
         'color': const Color(0xFF4CAF50), // グリーン
-        'isPopular': true, // 🔥 人気バッジをスタンダードに設定
+        'isPopular': true, // 🔥 人気バッジをライトに設定
       },
       {
         'id': 'premium',
@@ -45,21 +56,10 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
         'features': [
           {'title': 'メッセージ無制限', 'desc': '気になる相手といつでも会話できます。'},
           {'title': '足跡の表示', 'desc': 'あなたのプロフィールを見た人がわかります。'},
+          {'title': 'いいねされた人を見れる', 'desc': 'あなたにいいねしたお相手を確認できます。'},
           {'title': 'プロフィール優先表示', 'desc': '相手の検索結果で上位に表示されます。'},
-          {'title': 'いいね数の表示', 'desc': 'お相手がもらった累計いいね数がわかります。'},
         ],
         'color': AppColors.point,
-      },
-      {
-        'id': 'max',
-        'name': 'マックス',
-        'price': '1,480',
-        'features': [
-          {'title': 'スタンダード・プレミアムの全機能', 'desc': 'メッセージ無制限、足跡、いいね数表示など'},
-          {'title': '特定のユーザーに優先表示', 'desc': 'あなたが気になる属性のユーザーへ集中的にアプローチ。'},
-          {'title': '特別オファー機能', 'desc': '通常とは違う特別なアピールでマッチ率を劇的に高めます。'},
-        ],
-        'color': const Color(0xFF673AB7), // パープル
       },
     ];
 
@@ -120,6 +120,7 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
                                 horizontal: 2,
                               ),
                               width: double.infinity,
+                              height: 90,
                               decoration: BoxDecoration(
                                 color: isSelected
                                     ? planColor.withOpacity(0.04)
@@ -142,7 +143,8 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
                                     : null,
                               ),
                               child: Column(
-                                mainAxisSize: MainAxisSize.min,
+                                mainAxisSize: MainAxisSize.max,
+                                mainAxisAlignment: MainAxisAlignment.center,
                                 children: [
                                   Text(
                                     plan['name'],
@@ -285,7 +287,9 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
                     ),
                   ),
                   child: Text(
-                    '${plans[_selectedPlanIndex]['name']}プランに登録する',
+                    plans[_selectedPlanIndex]['id'] == 'free'
+                        ? 'フリープランを利用する'
+                        : '${plans[_selectedPlanIndex]['name']}プランに登録する',
                     style: const TextStyle(
                       fontSize: 16,
                       fontWeight: FontWeight.bold,

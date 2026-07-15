@@ -288,10 +288,17 @@ class _ProfilePreviewScreenState extends State<ProfilePreviewScreen> {
                     _buildContent(widget.data['bio']),
                   ],
 
-                  // 💡 趣味・好きなもの（必須項目化に伴い、こちらにも綺麗に表示されるように最適化！）
                   if (_hasValue(widget.data['hobby'])) ...[
-                    _buildSectionTitle('趣味・好きなもの'),
+                    _buildSectionTitle('趣味・好きなこと'),
                     _buildContent(widget.data['hobby']),
+                  ],
+                  if (_hasValue(widget.data['hobbyDetail'])) ...[
+                    _buildSectionTitle('趣味・好きなことの詳細'),
+                    _buildContent(widget.data['hobbyDetail']),
+                  ],
+                  if (_hasValue(widget.data['idealFriend'])) ...[
+                    _buildSectionTitle('どんな友達が欲しい？'),
+                    _buildContent(widget.data['idealFriend']),
                   ],
 
                   // 基本情報
@@ -299,6 +306,40 @@ class _ProfilePreviewScreenState extends State<ProfilePreviewScreen> {
                     _buildSectionTitle('基本情報'),
                     _buildInfoContainer(basicInfoTiles),
                   ],
+
+                  _buildSectionTitle('その他プロフィール'),
+                  _buildInfoContainer([
+                    if (_hasValue(widget.data['favoriteFood']))
+                      _buildDetailTile(
+                        Icons.restaurant,
+                        '好きな食べ物',
+                        widget.data['favoriteFood'],
+                      ),
+                    if (_hasValue(widget.data['dislikeFood']))
+                      _buildDetailTile(
+                        Icons.no_food,
+                        '苦手な食べ物',
+                        widget.data['dislikeFood'],
+                      ),
+                    if (_hasValue(widget.data['artist']))
+                      _buildDetailTile(
+                        Icons.music_note,
+                        '好きなアーティスト',
+                        widget.data['artist'],
+                      ),
+                    if (_hasValue(widget.data['game']))
+                      _buildDetailTile(
+                        Icons.sports_esports,
+                        '好きなゲーム',
+                        widget.data['game'],
+                      ),
+                    if (_hasValue(widget.data['anime']))
+                      _buildDetailTile(
+                        Icons.movie,
+                        '好きなアニメ・漫画',
+                        widget.data['anime'],
+                      ),
+                  ]),
 
                   // 💡 ライフスタイル・価値観シート
                   if (valuesData.isNotEmpty) ...[

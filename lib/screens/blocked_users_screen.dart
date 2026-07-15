@@ -86,7 +86,6 @@ class _BlockedUsersScreenState extends State<BlockedUsersScreen> {
         ),
         centerTitle: true,
         elevation: 0,
-        backgroundColor: Colors.white,
         iconTheme: const IconThemeData(color: Colors.black87),
       ),
       // 💡 自分のデータをリアルタイムに監視して、ブロックリストが空になったら自動で画面を更新します

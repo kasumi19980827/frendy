@@ -5,12 +5,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:matching_app/main.dart';
-import 'package:matching_app/screens/admin_messages_screen.dart';
-import 'package:matching_app/screens/blocked_users_screen.dart';
 import 'package:matching_app/screens/identity_verification_screen.dart';
 import 'package:matching_app/screens/login_screen.dart';
 import 'package:matching_app/screens/profile_setup_screen.dart';
 import 'package:matching_app/screens/subscription_screen.dart';
+import 'package:matching_app/screens/app_settings_screen.dart';
 
 class MypageScreen extends StatelessWidget {
   const MypageScreen({super.key});
@@ -195,19 +194,7 @@ class MypageScreen extends StatelessWidget {
                     Navigator.push(
                       context,
                       MaterialPageRoute(
-                        builder: (context) => const BlockedUsersScreen(),
-                      ),
-                    );
-                  },
-                ),
-                _buildSettingsItem(
-                  icon: Icons.campaign,
-                  label: '運営からのメッセージ',
-                  onTap: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (context) => const AdminMessagesScreen(),
+                        builder: (context) => const AppSettingsScreen(),
                       ),
                     );
                   },

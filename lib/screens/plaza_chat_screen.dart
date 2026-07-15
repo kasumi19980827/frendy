@@ -1,10 +1,11 @@
-import 'dart:ui'; // 💡 ぼかし効果(ImageFilter)を使用するためにインポート
+import 'dart:ui';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:matching_app/constants/app_colors.dart';
 import 'package:matching_app/models/chat_room.dart';
-import 'package:matching_app/screens/identity_verification_screen.dart'; // 💡 年齢確認画面への遷移に必要
+import 'package:matching_app/screens/identity_verification_screen.dart';
+import 'package:matching_app/screens/profile_detail_screen.dart';
 
 class PlazaChatScreen extends StatefulWidget {
   final ChatRoom room;
@@ -19,26 +20,19 @@ class _PlazaChatScreenState extends State<PlazaChatScreen> {
   final String myId = FirebaseAuth.instance.currentUser?.uid ?? "";
   Timestamp? myJoinedAt;
 
-  // 💡 追加：自分の年齢確認ステータス管理用の変数
-  String _myAgeVerifiedStatus =
-      'unsubmitted'; // 'unsubmitted', 'pending', 'verified', 'rejected'
+  String _myAgeVerifiedStatus = 'unsubmitted';
   bool _isCheckingVerification = true;
 
   @override
   void initState() {
     super.initState();
-    // 💡 まず最初に年齢確認状況を確認する
     _checkMyAgeVerification().then((_) {
-      // 年齢確認が済んでいる場合のみ、広場への入室処理（メンバー追加）を行う
       if (_myAgeVerifiedStatus == 'verified') {
         _enterRoom();
       }
     });
   }
 
-  // =========================
-  // 💡 自分の年齢確認状況をチェックする
-  // =========================
   Future<void> _checkMyAgeVerification() async {
     if (myId.isEmpty) return;
     try {
@@ -73,7 +67,6 @@ class _PlazaChatScreenState extends State<PlazaChatScreen> {
   }
 
   Future<void> _enterRoom() async {
-    // 💡 年齢確認が完了していない場合はメンバー追加処理（書き込み）を絶対に避ける
     if (_myAgeVerifiedStatus != 'verified') return;
 
     try {
@@ -136,22 +129,18 @@ class _PlazaChatScreenState extends State<PlazaChatScreen> {
         ),
         backgroundColor: Colors.white,
         elevation: 1,
-        // 右上のカウンターも、年齢確認が完了している場合のみ表示・タップ可能にする
         actions: [
           if (_myAgeVerifiedStatus == 'verified') _buildLiveMemberCounter(),
         ],
       ),
-      // 💡 年齢確認の初期確認時はロードインジケータを、確認後はレイヤーを重ねるStackを使用
       body: _isCheckingVerification
           ? const Center(child: CircularProgressIndicator())
           : Stack(
               children: [
-                // 1. チャットコンテンツのメインレイヤー
                 Column(
                   children: [
                     Expanded(
                       child: StreamBuilder<QuerySnapshot>(
-                        // 💡 年齢確認が完了していない場合は無駄な通信(メッセージ取得)を走らせない
                         stream:
                             _myAgeVerifiedStatus == 'verified' &&
                                 myJoinedAt != null
@@ -167,7 +156,6 @@ class _PlazaChatScreenState extends State<PlazaChatScreen> {
                                   .snapshots()
                             : const Stream.empty(),
                         builder: (context, snapshot) {
-                          // 未承認の場合はダミーのチャット背景UIを見せて雰囲気を作る
                           if (_myAgeVerifiedStatus != 'verified') {
                             return _buildDummyChatList();
                           }
@@ -295,18 +283,13 @@ class _PlazaChatScreenState extends State<PlazaChatScreen> {
                     _buildInputArea(),
                   ],
                 ),
-
-                // 2. 💡 年齢確認が未完了（verified以外）の時の「ぼかし（ブラー）」と「警告カードレイヤー」
                 if (_myAgeVerifiedStatus != 'verified')
                   Positioned.fill(
                     child: ClipRect(
                       child: BackdropFilter(
-                        filter: ImageFilter.blur(
-                          sigmaX: 8.0,
-                          sigmaY: 8.0,
-                        ), // ぼかし強度
+                        filter: ImageFilter.blur(sigmaX: 8.0, sigmaY: 8.0),
                         child: Container(
-                          color: Colors.black.withOpacity(0.12), // 薄暗い背景フィルム
+                          color: Colors.black.withOpacity(0.12),
                           child: Center(child: _buildVerificationPromptCard()),
                         ),
                       ),
@@ -317,11 +300,10 @@ class _PlazaChatScreenState extends State<PlazaChatScreen> {
     );
   }
 
-  // 💡 年齢確認前用の、背景に透けて見せるためのダミーメッセージ（審査＆リッチUI対策）
   Widget _buildDummyChatList() {
     return ListView(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
-      physics: const NeverScrollableScrollPhysics(), // スクロール不可
+      physics: const NeverScrollableScrollPhysics(),
       children: [
         _buildDummyBubble(
           name: "タカシ",
@@ -392,7 +374,6 @@ class _PlazaChatScreenState extends State<PlazaChatScreen> {
     );
   }
 
-  // 💡 画面中央に浮かび上がらせる年齢確認促し用カード
   Widget _buildVerificationPromptCard() {
     String message = '広場チャットで安全にみんなと会話するために、年齢確認・本人確認書類をご提出ください。';
     String btnText = '今すぐ年齢確認をする';
@@ -454,13 +435,12 @@ class _PlazaChatScreenState extends State<PlazaChatScreen> {
                     builder: (context) => const IdentityVerificationScreen(),
                   ),
                 ).then((_) {
-                  // 年齢確認画面から戻ってきた時に再度ステータスを読み込み直す
                   setState(() {
                     _isCheckingVerification = true;
                   });
                   _checkMyAgeVerification().then((_) {
                     if (_myAgeVerifiedStatus == 'verified') {
-                      _enterRoom(); // 承認されていたらその場で入室処理を完了
+                      _enterRoom();
                     }
                   });
                 });
@@ -517,7 +497,7 @@ class _PlazaChatScreenState extends State<PlazaChatScreen> {
                 ),
                 child: TextField(
                   controller: _controller,
-                  enabled: isVerified, // 💡 未承認時は入力欄自体も完全にロック
+                  enabled: isVerified,
                   decoration: InputDecoration(
                     hintText: isVerified ? 'メッセージを入力...' : '年齢確認を完了してください',
                     border: InputBorder.none,
@@ -537,9 +517,7 @@ class _PlazaChatScreenState extends State<PlazaChatScreen> {
                 Icons.send_rounded,
                 color: isVerified ? AppColors.point : Colors.grey,
               ),
-              onPressed: isVerified
-                  ? _sendMessage
-                  : null, // 💡 未承認時は送信アクションも無効化
+              onPressed: isVerified ? _sendMessage : null,
             ),
           ],
         ),
@@ -548,7 +526,6 @@ class _PlazaChatScreenState extends State<PlazaChatScreen> {
   }
 
   Future<void> _sendMessage() async {
-    // 💡 念のため送信タップ時のダブルチェック
     if (_myAgeVerifiedStatus != 'verified') return;
     if (_controller.text.trim().isEmpty) return;
 
@@ -653,12 +630,34 @@ class _PlazaChatScreenState extends State<PlazaChatScreen> {
                 itemCount: members.length,
                 itemBuilder: (context, index) {
                   final data = members[index].data() as Map<String, dynamic>;
+                  final String targetUserId = data['userId'];
+
                   return ListTile(
                     leading: _buildAvatar(data['photoUrl'], radius: 16),
                     title: Text(
                       data['name'] ?? '不明',
                       style: const TextStyle(fontSize: 14),
                     ),
+                    onTap: () async {
+                      // Firestoreから詳細データを取得してプロフィール画面へ渡す
+                      final userDoc = await FirebaseFirestore.instance
+                          .collection('users')
+                          .doc(targetUserId)
+                          .get();
+                      final userData = userDoc.data() ?? {};
+
+                      if (mounted) {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (context) => ProfileDetailScreen(
+                              userId: targetUserId,
+                              userData: userData,
+                            ),
+                          ),
+                        );
+                      }
+                    },
                   );
                 },
               );

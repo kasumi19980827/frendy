@@ -3,6 +3,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:matching_app/constants/app_colors.dart';
+import 'package:matching_app/constants/app_tags.dart';
 import 'package:matching_app/screens/profile_detail_screen.dart';
 
 class SearchScreen extends StatefulWidget {
@@ -102,13 +103,12 @@ class _SearchScreenState extends State<SearchScreen> {
                     // 趣味・嗜好に関連するすべてのフィールド一覧
                     final List<String> hobbyFields = [
                       'hobby',
+                      'hobbyDetail',
                       'anime',
-                      'youtube',
                       'game',
                       'artist',
-                      'pet',
-                      'brand',
-                      'interests',
+                      'favoriteFood',
+                      'dislikeFood',
                     ];
 
                     final List<String> ignoreWords = [
@@ -121,6 +121,17 @@ class _SearchScreenState extends State<SearchScreen> {
                       '特になしです',
                     ];
 
+                    // 文字列をキーワード単位に分割するための区切り文字（読点、スペース、中黒、スラッシュなど）
+                    List<String> _splitToKeywords(String text) {
+                      return text
+                          .split(RegExp(r'[、,。/・\s　]+')) // 全角半角の区切り文字をまとめて分割
+                          .map((s) => s.trim().toLowerCase())
+                          .where(
+                            (s) => s.length >= 2 && !ignoreWords.contains(s),
+                          ) // 1文字語は誤マッチしやすいので除外
+                          .toList();
+                    }
+
                     // --- 自分の全趣味・嗜好フィールドから有効な単語を抽出してリスト化 ---
                     final List<String> myCleanHobbies = [];
                     for (var field in hobbyFields) {
@@ -129,16 +140,12 @@ class _SearchScreenState extends State<SearchScreen> {
 
                       if (val is List) {
                         for (var item in val) {
-                          final str = item.toString().trim().toLowerCase();
-                          if (str.isNotEmpty && !ignoreWords.contains(str)) {
-                            myCleanHobbies.add(str);
-                          }
+                          myCleanHobbies.addAll(
+                            _splitToKeywords(item.toString()),
+                          );
                         }
                       } else {
-                        final str = val.toString().trim().toLowerCase();
-                        if (str.isNotEmpty && !ignoreWords.contains(str)) {
-                          myCleanHobbies.add(str);
-                        }
+                        myCleanHobbies.addAll(_splitToKeywords(val.toString()));
                       }
                     }
 
@@ -243,11 +250,8 @@ class _SearchScreenState extends State<SearchScreen> {
                           matchesFilterTags;
                     }).toList();
 
-                    // --- 相手との共通趣味・嗜好スコアを算出するヘルパー関数 ---
                     int getHobbyMatchScore(Map<String, dynamic> targetData) {
                       int score = 0;
-
-                      // 相手の趣味・嗜好に関するテキストを一括で結合
                       StringBuffer targetBuffer = StringBuffer();
                       for (var field in hobbyFields) {
                         final val = targetData[field];
@@ -260,7 +264,6 @@ class _SearchScreenState extends State<SearchScreen> {
                       }
                       final targetText = targetBuffer.toString().toLowerCase();
 
-                      // 自分の抽出した趣味単語が相手のテキストに含まれているか走査
                       for (var myHobby in myCleanHobbies) {
                         if (targetText.contains(myHobby)) {
                           score++;
@@ -805,7 +808,6 @@ class _SearchScreenState extends State<SearchScreen> {
     );
   }
 
-  // 検索フィルター用ボトムシート（後半のコードが省略されていたため、完全に動作するように補完）
   void _showFilterSheet(BuildContext context) {
     showModalBottomSheet(
       context: context,
@@ -818,7 +820,7 @@ class _SearchScreenState extends State<SearchScreen> {
           builder: (context, setSheetState) {
             return Container(
               padding: const EdgeInsets.all(24.0),
-              height: MediaQuery.of(context).size.height * 0.8,
+              height: MediaQuery.of(context).size.height * 0.85, // 少し余裕を持たせる
               child: SingleChildScrollView(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -831,6 +833,39 @@ class _SearchScreenState extends State<SearchScreen> {
                       ),
                     ),
                     const SizedBox(height: 24),
+
+                    // --- タグ選択欄 ---
+                    const Text(
+                      'タグで絞り込む',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8.0,
+                      runSpacing: 4.0,
+                      children: AppTags.allTags.map((tag) {
+                        final isSelected = _selectedTags.contains(tag);
+                        return FilterChip(
+                          label: Text(tag),
+                          selected: isSelected,
+                          selectedColor: AppColors.point.withOpacity(0.3),
+                          onSelected: (val) {
+                            setSheetState(() {
+                              if (val) {
+                                if (_selectedTags.length < 5)
+                                  _selectedTags.add(tag);
+                              } else {
+                                _selectedTags.remove(tag);
+                              }
+                            });
+                            setState(() {}); // 検索結果を即時反映
+                          },
+                        );
+                      }).toList(),
+                    ),
+                    const SizedBox(height: 24),
+
+                    // --- 性別 ---
                     const Text(
                       '性別',
                       style: TextStyle(fontWeight: FontWeight.bold),
@@ -855,6 +890,8 @@ class _SearchScreenState extends State<SearchScreen> {
                           .toList(),
                     ),
                     const SizedBox(height: 24),
+
+                    // --- 年齢範囲 ---
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
@@ -880,8 +917,6 @@ class _SearchScreenState extends State<SearchScreen> {
                       max: 80,
                       divisions: 62,
                       activeColor: AppColors.point,
-                      inactiveColor: Colors.grey[200],
-                      labels: RangeLabels('$_minAge歳', '$_maxAge歳'),
                       onChanged: (RangeValues values) {
                         setSheetState(() {
                           _minAge = values.start.round();
@@ -891,6 +926,8 @@ class _SearchScreenState extends State<SearchScreen> {
                       },
                     ),
                     const SizedBox(height: 32),
+
+                    // --- 適用ボタン ---
                     SizedBox(
                       width: double.infinity,
                       height: 50,
@@ -898,9 +935,6 @@ class _SearchScreenState extends State<SearchScreen> {
                         onPressed: () => Navigator.pop(context),
                         style: ElevatedButton.styleFrom(
                           backgroundColor: Colors.black87,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
                         ),
                         child: const Text(
                           '適用する',

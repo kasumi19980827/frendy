@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:matching_app/constants/app_colors.dart';
 import 'package:firebase_storage/firebase_storage.dart';
+import 'package:matching_app/constants/app_tags.dart';
 import 'package:matching_app/screens/profile_preview_screen.dart';
 import 'dart:typed_data';
 
@@ -24,26 +25,19 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
   final _workController = TextEditingController();
   final _bioController = TextEditingController(); // 自己紹介 (任意)
   final _hobbyController = TextEditingController(); // 趣味・好きなこと (必須に変更)
+  final _hobbyDetailController = TextEditingController();
+  final _favoriteFoodController = TextEditingController();
+  final _dislikeFoodController = TextEditingController();
+  final _artistController = TextEditingController();
+  final _gameController = TextEditingController();
+  final _animeController = TextEditingController();
+  final _idealFriendController = TextEditingController();
+
+  List<String> _selectedTags = [];
 
   // --- 画像・タグ関連 ---
   final List<dynamic> _displayImages = List.filled(10, null);
   final ImagePicker _picker = ImagePicker();
-
-  List<String> _selectedTags = [];
-  final List<String> _allTags = [
-    '飲み仲間募集',
-    'ゲーム仲間募集',
-    '推し活仲間募集',
-    'ライブ仲間募集',
-    '趣味仲間募集',
-    'アウトドアな人募集',
-    'インドアな人募集',
-    'ご飯屋行きたい',
-    'カフェ行きたい',
-    '恋人募集',
-    '通話したい',
-    '同年代と繋がりたい',
-  ];
 
   bool _isLoading = false;
   String _selectedGender = '男性';
@@ -91,6 +85,13 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
         _workController.text = data['work'] ?? '';
         _hobbyController.text = data['hobby'] ?? '';
         _bioController.text = data['bio'] ?? '';
+        _hobbyDetailController.text = data['hobbyDetail'] ?? '';
+        _favoriteFoodController.text = data['favoriteFood'] ?? '';
+        _dislikeFoodController.text = data['dislikeFood'] ?? '';
+        _artistController.text = data['artist'] ?? '';
+        _gameController.text = data['game'] ?? '';
+        _animeController.text = data['anime'] ?? '';
+        _idealFriendController.text = data['idealFriend'] ?? '';
 
         if (data['tags'] != null) {
           _selectedTags = List<String>.from(data['tags']);
@@ -136,6 +137,9 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
     if (_hobbyController.text.trim().isEmpty)
       return _showError('趣味・好きなものを入力してください');
 
+    if (_hobbyDetailController.text.trim().isEmpty)
+      return _showError('趣味について詳しく教えてください');
+
     // 画像は最低1枚
     if (_displayImages.every((img) => img == null)) {
       return _showError('写真を1枚以上設定してください');
@@ -144,6 +148,10 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
     // 年齢数値チェック
     if (int.tryParse(_ageController.text.trim()) == null) {
       return _showError('年齢は数字で入力してください');
+    }
+
+    if (_idealFriendController.text.trim().isEmpty) {
+      return _showError('どんな友達が欲しいか教えてください');
     }
 
     return true;
@@ -215,6 +223,13 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
         'tags': _selectedTags,
         'imageUrls': finalUrls,
         'updatedAt': Timestamp.now(),
+        'hobbyDetail': _hobbyDetailController.text.trim(),
+        'favoriteFood': _favoriteFoodController.text.trim(),
+        'dislikeFood': _dislikeFoodController.text.trim(),
+        'artist': _artistController.text.trim(),
+        'game': _gameController.text.trim(),
+        'anime': _animeController.text.trim(),
+        'idealFriend': _idealFriendController.text.trim(),
       }, SetOptions(merge: true));
 
       setState(() {
@@ -269,6 +284,13 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
                   'imageUrls': _displayImages,
                   'gender': _selectedGender,
                   'values': _myValues,
+                  'hobbyDetail': _hobbyDetailController.text,
+                  'favoriteFood': _favoriteFoodController.text,
+                  'dislikeFood': _dislikeFoodController.text,
+                  'artist': _artistController.text,
+                  'game': _gameController.text,
+                  'anime': _animeController.text,
+                  'idealFriend': _idealFriendController.text,
                 };
                 Navigator.push(
                   context,
@@ -328,18 +350,32 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
                   ),
                   _buildLocationControllerField(),
 
-                  _buildSectionTitle('基本プロフィール（任意）'),
-                  _buildTextField(_schoolController, '学校', Icons.school),
-                  _buildTextField(_workController, '職業', Icons.work),
-
                   // 💡 趣味・好きなものを必須に変更（アスタリスク * を追加）
                   _buildSectionTitle('趣味・好きなもの（必須）*'),
                   _buildTextField(
                     _hobbyController,
-                    '趣味、好きなゲームやブランドなど自由に入力 *',
+                    '趣味・好きなものを教えてください',
                     Icons.interests,
                   ),
-
+                  _buildSectionTitle('趣味・好きなものについて詳しく教えてください（必須）*'),
+                  _buildMultiLineField(
+                    _hobbyDetailController,
+                    '自由に入力してください（詳しく書くと会話が弾みやすくなります！）',
+                  ),
+                  _buildSectionTitle('どんな友達が欲しい？（必須）*'),
+                  _buildMultiLineField(
+                    _idealFriendController,
+                    '例：一緒にカフェ巡りできる人、趣味のゲームを語れる人など',
+                  ),
+                  const SizedBox(height: 40),
+                  const Text(
+                    '※これより下の項目はすべて任意です',
+                    style: TextStyle(
+                      fontSize: 14,
+                      color: Colors.grey,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
                   // 自己紹介（任意・ワンタップ入力補助つき）
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -363,15 +399,36 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
                       ),
                     ],
                   ),
-                  _buildMultiLineField(
-                    _bioController,
-                    '休日の過ごし方や、好きな音楽、よく観るYouTubeなどを自由に書きましょう！',
-                  ),
+                  _buildMultiLineField(_bioController, '自由に書きましょう！'),
 
                   // 💡 ライフスタイル・価値観シート（任意のままでOK！）
                   _buildSectionTitle('ライフスタイル・価値観シート（任意）'),
                   _buildInlineValueSheet(),
 
+                  _buildSectionTitle('その他プロフィール（任意）'),
+                  _buildTextField(_schoolController, '学校', Icons.school),
+                  _buildTextField(_workController, '職業', Icons.work),
+                  _buildTextField(
+                    _favoriteFoodController,
+                    '好きな食べ物',
+                    Icons.restaurant,
+                  ),
+                  _buildTextField(
+                    _dislikeFoodController,
+                    '苦手な食べ物',
+                    Icons.no_food,
+                  ),
+                  _buildTextField(
+                    _artistController,
+                    '好きなアーティスト',
+                    Icons.music_note,
+                  ),
+                  _buildTextField(
+                    _gameController,
+                    '好きなゲーム',
+                    Icons.sports_esports,
+                  ),
+                  _buildTextField(_animeController, '好きなアニメ・漫画', Icons.movie),
                   const SizedBox(height: 50),
                 ],
               ),
@@ -441,7 +498,7 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
   Widget _buildTagSection() {
     return Wrap(
       spacing: 8,
-      children: _allTags.map((tag) {
+      children: AppTags.allTags.map((tag) {
         final isSelected = _selectedTags.contains(tag);
         return FilterChip(
           label: Text(tag),
@@ -657,6 +714,13 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
     _workController.dispose();
     _hobbyController.dispose();
     _bioController.dispose();
+    _hobbyDetailController.dispose();
+    _favoriteFoodController.dispose();
+    _dislikeFoodController.dispose();
+    _artistController.dispose();
+    _gameController.dispose();
+    _animeController.dispose();
+    _idealFriendController.dispose();
     super.dispose();
   }
 }

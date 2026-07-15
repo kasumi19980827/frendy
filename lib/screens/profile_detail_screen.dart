@@ -545,10 +545,59 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
                         _buildContent(data['hobby']),
                       ],
 
+                      if (_hasValue(data['hobbyDetail'])) ...[
+                        _buildSectionTitle('趣味・好きなものの詳細'),
+                        _buildContent(data['hobbyDetail']),
+                      ],
+                      if (_hasValue(data['idealFriend'])) ...[
+                        _buildSectionTitle('どんな友達が欲しい？'),
+                        _buildContent(data['idealFriend']),
+                      ],
+
                       // 基本情報 (性別、居住地、学校、職業)
                       if (basicInfoTiles.isNotEmpty) ...[
                         _buildSectionTitle('基本情報'),
                         _buildInfoContainer(basicInfoTiles),
+                      ],
+
+                      if (_hasValue(data['favoriteFood']) ||
+                          _hasValue(data['dislikeFood']) ||
+                          _hasValue(data['artist']) ||
+                          _hasValue(data['game']) ||
+                          _hasValue(data['anime'])) ...[
+                        _buildSectionTitle('その他プロフィール'),
+                        _buildInfoContainer([
+                          if (_hasValue(data['favoriteFood']))
+                            _buildDetailTile(
+                              Icons.restaurant,
+                              '好きな食べ物',
+                              data['favoriteFood'],
+                            ),
+                          if (_hasValue(data['dislikeFood']))
+                            _buildDetailTile(
+                              Icons.no_food,
+                              '苦手な食べ物',
+                              data['dislikeFood'],
+                            ),
+                          if (_hasValue(data['artist']))
+                            _buildDetailTile(
+                              Icons.music_note,
+                              '好きなアーティスト',
+                              data['artist'],
+                            ),
+                          if (_hasValue(data['game']))
+                            _buildDetailTile(
+                              Icons.sports_esports,
+                              '好きなゲーム',
+                              data['game'],
+                            ),
+                          if (_hasValue(data['anime']))
+                            _buildDetailTile(
+                              Icons.movie,
+                              '好きなアニメ・漫画',
+                              data['anime'],
+                            ),
+                        ]),
                       ],
 
                       // 💡 ライフスタイル・価値観シート
