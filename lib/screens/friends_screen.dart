@@ -1,8 +1,10 @@
+import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:matching_app/constants/app_colors.dart';
 import 'package:matching_app/screens/profile_detail_screen.dart';
+import 'package:matching_app/screens/subscription_screen.dart';
 
 class FriendsScreen extends StatefulWidget {
   const FriendsScreen({super.key});
@@ -138,9 +140,17 @@ class _FriendsScreenState extends State<FriendsScreen> {
       case 'いいねした':
         return _buildUserListFromField('likes', 'いいねしたユーザーはいません');
       case 'いいねされた':
-        return _buildUserListFromField('likedBy', 'まだいいねが届いていません');
+        return _buildUserListFromField(
+          'likedBy',
+          'まだいいねが届いていません',
+          isLikeList: true,
+        );
       case '足跡':
-        return _buildUserListFromField('footprints', 'まだ足跡はありません');
+        return _buildUserListFromField(
+          'footprints',
+          'まだ足跡はありません',
+          isFootprints: true,
+        );
       default:
         return const Center(child: Text('準備中'));
     }
@@ -336,7 +346,12 @@ class _FriendsScreenState extends State<FriendsScreen> {
   }
 
   // --- 3. 共通リスト（いいね・足跡） ---
-  Widget _buildUserListFromField(String fieldName, String emptyMessage) {
+  Widget _buildUserListFromField(
+    String fieldName,
+    String emptyMessage, {
+    bool isFootprints = false,
+    bool isLikeList = false,
+  }) {
     return StreamBuilder<DocumentSnapshot>(
       stream: FirebaseFirestore.instance
           .collection('users')
@@ -356,6 +371,16 @@ class _FriendsScreenState extends State<FriendsScreen> {
             ),
           );
 
+        // 💡 リアルタイムのFirestoreスナップショットから直接プランを判定
+        //    → プラン変更が即座に反映され、ホットリロード不要になる
+        final String livePlan = myData['plan'] ?? 'free';
+
+        // 💡 足跡タブ：フリープランのみモザイク（ライト以降で解除）
+        // 💡 いいねタブ：フリー・ライトプランはモザイク（スタンダード以降で解除）
+        final bool shouldBlur =
+            (isFootprints && livePlan == 'free') ||
+            (isLikeList && (livePlan == 'free' || livePlan == 'light'));
+
         return ListView.builder(
           itemCount: userIds.length,
           itemBuilder: (context, index) {
@@ -369,29 +394,175 @@ class _FriendsScreenState extends State<FriendsScreen> {
                 if (!userSnap.hasData) return const SizedBox();
                 final userData =
                     userSnap.data!.data() as Map<String, dynamic>? ?? {};
+                final String name = userData['name'] ?? 'ユーザー';
+                final bool hasImage =
+                    (userData['imageUrls'] as List?)?.isNotEmpty == true;
+
+                final Widget avatar = CircleAvatar(
+                  backgroundImage: hasImage
+                      ? NetworkImage(userData['imageUrls'][0])
+                      : null,
+                  child: hasImage ? null : const Icon(Icons.person),
+                );
+
                 return ListTile(
-                  leading: CircleAvatar(
-                    backgroundImage:
-                        (userData['imageUrls'] as List?)?.isNotEmpty == true
-                        ? NetworkImage(userData['imageUrls'][0])
-                        : null,
-                  ),
-                  title: Text(userData['name'] ?? 'ユーザー'),
-                  onTap: () => Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => ProfileDetailScreen(
-                        userData: userData,
-                        userId: peerId,
-                      ),
-                    ),
-                  ),
+                  leading: shouldBlur
+                      ? ImageFiltered(
+                          imageFilter: ImageFilter.blur(sigmaX: 6, sigmaY: 6),
+                          child: avatar,
+                        )
+                      : avatar,
+                  title: shouldBlur
+                      ? Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: const [
+                            Text(
+                              '●●●●',
+                              style: TextStyle(
+                                color: Colors.grey,
+                                letterSpacing: 2,
+                              ),
+                            ),
+                            SizedBox(width: 6),
+                            Icon(Icons.lock, size: 14, color: Colors.grey),
+                          ],
+                        )
+                      : Text(name),
+                  subtitle: shouldBlur
+                      ? const Text(
+                          'プラン登録で誰か確認できます',
+                          style: TextStyle(fontSize: 11, color: Colors.grey),
+                        )
+                      : null,
+                  onTap: () {
+                    if (shouldBlur) {
+                      if (isLikeList) {
+                        _showLikeUpgradeDialog(context);
+                      } else {
+                        _showFootprintUpgradeDialog(context);
+                      }
+                    } else {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => ProfileDetailScreen(
+                            userData: userData,
+                            userId: peerId,
+                          ),
+                        ),
+                      );
+                    }
+                  },
                 );
               },
             );
           },
         );
       },
+    );
+  }
+
+  // 💡 足跡モザイクをタップした際、プラン登録を促すダイアログ
+  void _showFootprintUpgradeDialog(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text(
+          '足跡は非表示中です',
+          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+        ),
+        content: const Text(
+          '現在フリープランをご利用中のため、あなたのプロフィールを見た人の詳細はモザイク表示になっています。\n\n'
+          '『ライトプラン』以降に登録すると、足跡をつけた相手をすべて確認できるようになります。',
+          style: TextStyle(fontSize: 14, height: 1.5, color: Colors.black54),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text(
+              '閉じる',
+              style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold),
+            ),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.point,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+              elevation: 0,
+            ),
+            onPressed: () {
+              Navigator.pop(context);
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const SubscriptionScreen()),
+              );
+            },
+            child: const Text(
+              'プラン一覧を見る',
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // 💡 いいねモザイクをタップした際、スタンダード以降への登録を促すダイアログ
+  void _showLikeUpgradeDialog(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text(
+          'いいねは非表示中です',
+          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+        ),
+        content: const Text(
+          '現在のプランでは、いいねの詳細はモザイク表示になっています。\n\n'
+          '『スタンダードプラン』以降に登録すると、いいねした相手・された相手をすべて確認できるようになります。',
+          style: TextStyle(fontSize: 14, height: 1.5, color: Colors.black54),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text(
+              '閉じる',
+              style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold),
+            ),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.point,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+              elevation: 0,
+            ),
+            onPressed: () {
+              Navigator.pop(context);
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const SubscriptionScreen()),
+              );
+            },
+            child: const Text(
+              'プラン一覧を見る',
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 

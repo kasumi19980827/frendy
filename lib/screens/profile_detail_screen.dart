@@ -134,9 +134,9 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
     // 2. 新規でチャットを開始する場合の上限人数を取得
     int allowedLimit = 9999;
     if (_myPlan == 'free') {
-      allowedLimit = 3; // 💡 フリープランは最大3人まで
+      allowedLimit = 5; // 💡 フリープランは最大5人まで
     } else if (_myPlan == 'light') {
-      allowedLimit = 8; // ライトプランは最大8人まで
+      allowedLimit = 15; // ライトプランは最大15人まで
     }
 
     // すでに上限以上の人とチャットしている場合、新規トークをブロックしてサブスクへ誘導
@@ -262,7 +262,7 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
     final bool isFreeLimitReached =
         _myPlan == 'free' &&
         !_hasChatHistoryWithThisPeer &&
-        _activeTalkCount >= 3;
+        _activeTalkCount >= 5;
 
     return Scaffold(
       backgroundColor: Colors.white,
@@ -663,9 +663,9 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
                           : (isFreeLimitReached
                                 ? () =>
                                       _showLimitReachedDialog(
-                                        3,
+                                        5,
                                       ) // タップ時にプラン案内ダイアログを表示
-                                : _handleTalkTransition), // 正常時
+                                : _handleTalkTransition),
                       style: ElevatedButton.styleFrom(
                         backgroundColor: isFreeLimitReached
                             ? Colors.grey[400]
