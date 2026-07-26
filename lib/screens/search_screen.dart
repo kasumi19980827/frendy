@@ -213,7 +213,7 @@ class _SearchScreenState extends State<SearchScreen> {
                               _contains(data['location']) ||
                               _contains(data['bio']) ||
                               _contains(data['interests']) ||
-                              _contains(data['targetFriend']) ||
+                              _contains(data['idealFriend']) ||
                               _contains(data['school']) ||
                               _contains(data['work']) ||
                               _contains(data['qualification']) ||
@@ -272,6 +272,13 @@ class _SearchScreenState extends State<SearchScreen> {
                       return score;
                     }
 
+                    // 💡 プレミアムプランのユーザーを検索結果で優先表示するための重み付け
+                    //    プレミアムなら1、それ以外は0 → 降順ソートで常に最上位に来る
+                    int getPlanPriority(Map<String, dynamic> targetData) {
+                      final String plan = targetData['plan'] ?? 'free';
+                      return plan == 'premium' ? 1 : 0;
+                    }
+
                     // 2. 選択されたタブ（_selectedTab）に応じた【除外】および【ソート】
                     if (_selectedTab == 'recommend') {
                       // おすすめ条件（共通趣味スコアが1以上）でフィルタリング
@@ -296,13 +303,18 @@ class _SearchScreenState extends State<SearchScreen> {
                         docs.sort((a, b) {
                           final aData = a.data() as Map<String, dynamic>;
                           final bData = b.data() as Map<String, dynamic>;
+                          // 💡 まずプレミアムかどうかで比較し、同じなら趣味マッチ度で比較
+                          final int planCompare = getPlanPriority(
+                            bData,
+                          ).compareTo(getPlanPriority(aData));
+                          if (planCompare != 0) return planCompare;
                           return getHobbyMatchScore(
                             bData,
                           ).compareTo(getHobbyMatchScore(aData));
                         });
                       }
                     } else if (_selectedTab == 'popular') {
-                      // 【人気順】いいね数（likeCount）が多い順にソート
+                      // 【人気順】いいね数（likeCount）が多い順にソート（プレミアム優先は適用しない）
                       docs.sort((a, b) {
                         final aData = a.data() as Map<String, dynamic>;
                         final bData = b.data() as Map<String, dynamic>;
@@ -319,10 +331,15 @@ class _SearchScreenState extends State<SearchScreen> {
                         return bLikes.compareTo(aLikes);
                       });
                     } else {
-                      // 【ユーザー】最終ログイン順（lastLoginTime）が新しい順にソート
+                      // 【ユーザー】プレミアムを最優先し、同じ優先度内は最終ログイン順（lastLoginTime）が新しい順にソート
                       docs.sort((a, b) {
                         final aData = a.data() as Map<String, dynamic>;
                         final bData = b.data() as Map<String, dynamic>;
+
+                        final int planCompare = getPlanPriority(
+                          bData,
+                        ).compareTo(getPlanPriority(aData));
+                        if (planCompare != 0) return planCompare;
 
                         final Timestamp? aTime =
                             aData['lastLoginTime'] as Timestamp?;
@@ -408,7 +425,7 @@ class _SearchScreenState extends State<SearchScreen> {
     final String gender = data['gender'] ?? '未設定';
     final String bio = data['bio'] ?? '未設定';
     final String interests = data['interests'] ?? '未設定';
-    final String target = data['targetFriend'] ?? '未設定';
+    final String target = data['idealFriend'] ?? '未設定';
     final String? imageUrl = (data['imageUrls'] as List?)?.isNotEmpty == true
         ? data['imageUrls'][0]
         : null;
@@ -525,7 +542,7 @@ class _SearchScreenState extends State<SearchScreen> {
                     ),
                   ),
                   const SizedBox(height: 16),
-                  _buildSectionTitle("欲しい友達のタイプ"),
+                  _buildSectionTitle("どんな友達が欲しい？"),
                   Text(
                     target,
                     style: const TextStyle(

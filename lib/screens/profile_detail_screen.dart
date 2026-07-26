@@ -29,7 +29,7 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
 
   // 💡 プラン別制限用の変数群
   String _myPlan = 'free'; // 'free', 'light', 'standard', etc.
-  int _activeTalkCount = 0;
+  int _monthlyNewTalkCount = 0; // 今月すでに使った新規トーク開始枠の数
   bool _hasChatHistoryWithThisPeer = false;
   bool _isLoadingLimits = true;
 
@@ -58,40 +58,39 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
     return true;
   }
 
+  // 💡 現在の年月を "2026-07" のような文字列で返す（月次リセット判定に使用）
+  String _currentPeriodString() {
+    final DateTime now = DateTime.now();
+    return '${now.year}-${now.month.toString().padLeft(2, '0')}';
+  }
+
   // ==========================================
-  // 💡 プランとトーク人数制限を読み込むバックエンド処理
+  // 💡 プランと月次トーク開始枠を読み込むバックエンド処理
   // ==========================================
   Future<void> _loadUserPlanAndLimits() async {
     final String? myId = FirebaseAuth.instance.currentUser?.uid;
     if (myId == null) return;
 
     try {
-      // 1. 自分の現在のプラン情報を取得
+      // 1. 自分の現在のプラン情報 & 月次カウンターを取得
       final myDoc = await FirebaseFirestore.instance
           .collection('users')
           .doc(myId)
           .get();
       if (myDoc.exists) {
-        _myPlan = myDoc.data()?['plan'] ?? 'free';
+        final myData = myDoc.data() ?? {};
+        _myPlan = myData['plan'] ?? 'free';
+
+        // 💡 保存されている集計対象月と「今月」が違えば、表示上は0人扱いにする
+        //    （実際のFirestore側のリセットは、次回消費時にトランザクションで行う）
+        final String storedPeriod = myData['monthlyResetPeriod'] ?? '';
+        final int storedCount = myData['monthlyNewTalkCount'] ?? 0;
+        _monthlyNewTalkCount = (storedPeriod == _currentPeriodString())
+            ? storedCount
+            : 0;
       }
 
-      // 2. 現在アクティブな（メッセージが存在する）トークルームの数を取得
-      final chatRoomsSnapshot = await FirebaseFirestore.instance
-          .collection('chat_rooms')
-          .where('users', arrayContains: myId)
-          .get();
-
-      // lastMessage が入っているアクティブなルーム数をカウント（自分側の非表示 blockedBy は除く）
-      final activeRooms = chatRoomsSnapshot.docs.where((doc) {
-        final chatData = doc.data();
-        final String lastMessage = chatData['lastMessage'] ?? '';
-        final List<dynamic> roomBlockedBy = chatData['blockedBy'] ?? [];
-        return lastMessage.isNotEmpty && !roomBlockedBy.contains(myId);
-      }).toList();
-
-      _activeTalkCount = activeRooms.length;
-
-      // 3. このお相手との個別トーク履歴がすでに存在するかチェック
+      // 2. このお相手との個別トーク履歴がすでに存在するかチェック
       final String chatRoomId = ([myId, widget.userId]..sort()).join("_");
       final roomDoc = await FirebaseFirestore.instance
           .collection('chat_rooms')
@@ -118,10 +117,48 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
     }
   }
 
+  // 💡 現在のプランにおける「月あたりの新規トーク開始可能数」を返す
+  //    フリー: 5人/月、ライト: 15人/月、それ以外: 無制限
+  int _monthlyAllowedLimit() {
+    if (_myPlan == 'free') return 5;
+    if (_myPlan == 'light') return 15;
+    return 9999;
+  }
+
+  // 💡 月次の新規トーク開始枠を1つ消費する（トランザクションで安全に処理）
+  //    月が変わっていれば自動的にカウントを1から数え直す
+  Future<bool> _tryConsumeMonthlySlot(String myId, int allowedLimit) async {
+    final docRef = FirebaseFirestore.instance.collection('users').doc(myId);
+    final String currentPeriod = _currentPeriodString();
+
+    return FirebaseFirestore.instance.runTransaction<bool>((transaction) async {
+      final snapshot = await transaction.get(docRef);
+      final data = snapshot.data() ?? {};
+      final String storedPeriod = data['monthlyResetPeriod'] ?? '';
+      final int storedCount = data['monthlyNewTalkCount'] ?? 0;
+
+      // 保存されている月が今月と違えば、0人からカウントし直す（＝月次リセット）
+      final int currentCount = (storedPeriod == currentPeriod)
+          ? storedCount
+          : 0;
+
+      if (currentCount >= allowedLimit) {
+        return false; // 上限到達につき消費できない
+      }
+
+      transaction.set(docRef, {
+        'monthlyNewTalkCount': currentCount + 1,
+        'monthlyResetPeriod': currentPeriod,
+      }, SetOptions(merge: true));
+
+      return true;
+    });
+  }
+
   // ==========================================
-  // 💡 新規トーク開始の可否チェック＆遷移
+  // 💡 新規トーク開始の可否チェック＆遷移（月次カウンター消費方式）
   // ==========================================
-  void _handleTalkTransition() {
+  Future<void> _handleTalkTransition() async {
     final String? myId = FirebaseAuth.instance.currentUser?.uid;
     if (myId == null) return;
 
@@ -131,27 +168,33 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
       return;
     }
 
-    // 2. 新規でチャットを開始する場合の上限人数を取得
-    int allowedLimit = 9999;
-    if (_myPlan == 'free') {
-      allowedLimit = 5; // 💡 フリープランは最大5人まで
-    } else if (_myPlan == 'light') {
-      allowedLimit = 15; // ライトプランは最大15人まで
+    final int allowedLimit = _monthlyAllowedLimit();
+
+    // 無制限プラン（スタンダード以上）はカウンター消費なしでそのまま遷移
+    if (allowedLimit >= 9999) {
+      _navigateToTalkScreen();
+      return;
     }
 
-    // すでに上限以上の人とチャットしている場合、新規トークをブロックしてサブスクへ誘導
-    if (_activeTalkCount >= allowedLimit) {
-      _showLimitReachedDialog(allowedLimit);
-    } else {
+    // 2. 月次の新規トーク開始枠を1つ消費できるか試みる（トランザクションで安全に判定）
+    final bool consumed = await _tryConsumeMonthlySlot(myId, allowedLimit);
+    if (!mounted) return;
+
+    if (consumed) {
+      setState(() {
+        _monthlyNewTalkCount += 1; // 画面上の表示もその場で更新
+      });
       _navigateToTalkScreen();
+    } else {
+      _showLimitReachedDialog(allowedLimit);
     }
   }
 
   // 枠上限に達した時の誘導アラート
   void _showLimitReachedDialog(int limit) {
-    String title = "トーク上限に達しました";
+    String title = "今月のトーク開始上限に達しました";
     String content =
-        "現在フリープラン（上限 $limit人）をご利用中のため、これ以上新しい人とトークを始めることができません。\n\n『ライトプラン』や『スタンダードプラン』に登録して、もっとたくさんの友達と会話を楽しみませんか？";
+        "現在のプランでは、新しく話しかけられるのは月に$limit人までです。今月はすでに上限に達しています。\n\n『ライトプラン』や『スタンダードプラン』に登録すると、月あたりの上限が増えたり、上限なしで会話できるようになります。";
 
     showDialog(
       context: context,
@@ -258,11 +301,13 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
       basicInfoTiles.add(_buildDetailTile(Icons.work, '職業', data['work']));
     }
 
-    // 💡 フリープランの上限に達しているかどうかを判定
-    final bool isFreeLimitReached =
-        _myPlan == 'free' &&
+    // 💡 今月の新規トーク開始枠の上限に達しているかどうかを判定
+    //    （フリー・ライトのように上限が設定されているプランが対象。無制限プランは常にfalse）
+    final int _allowedLimit = _monthlyAllowedLimit();
+    final bool isMonthlyLimitReached =
+        _allowedLimit < 9999 &&
         !_hasChatHistoryWithThisPeer &&
-        _activeTalkCount >= 5;
+        _monthlyNewTalkCount >= _allowedLimit;
 
     return Scaffold(
       backgroundColor: Colors.white,
@@ -643,13 +688,13 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
             child: SizedBox(
               width: double.infinity,
               height: 54,
-              // 💡 人数情報をロード中はインジケータ等を表示、完了したらプラン別制限判定付きのボタンを表示
+              // 💡 情報をロード中はインジケータ等を表示、完了したらプラン別制限判定付きのボタンを表示
               child: _isLoadingLimits
                   ? const Center(child: CircularProgressIndicator())
                   : ElevatedButton.icon(
                       icon: const Icon(Icons.send, color: Colors.white),
                       label: Text(
-                        isFreeLimitReached ? 'トーク上限に達しました' : 'トークする',
+                        isMonthlyLimitReached ? '今月のトーク開始上限です' : 'トークする',
                         style: const TextStyle(
                           color: Colors.white,
                           fontWeight: FontWeight.bold,
@@ -657,17 +702,17 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
                         ),
                       ),
                       // 💡 1. 自分のプロフィールならボタン無効
-                      // 💡 2. フリープランかつ新規相手で3人制限に達している場合はボタンを完全に無効化（グレーアウト）
+                      // 💡 2. 新規相手で今月の上限に達している場合はボタンを完全に無効化（グレーアウト）
                       onPressed: isMyProfile
                           ? null
-                          : (isFreeLimitReached
+                          : (isMonthlyLimitReached
                                 ? () =>
                                       _showLimitReachedDialog(
-                                        5,
+                                        _allowedLimit,
                                       ) // タップ時にプラン案内ダイアログを表示
-                                : _handleTalkTransition),
+                                : _handleTalkTransition), // 正常時
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: isFreeLimitReached
+                        backgroundColor: isMonthlyLimitReached
                             ? Colors.grey[400]
                             : AppColors.point,
                         elevation: 0,
@@ -814,8 +859,8 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
         'likes': FieldValue.arrayUnion([peerId]),
       });
       batch.update(peerDoc, {
-        'likedBy': FieldValue.arrayUnion([myId]),
-        'likeCount': FieldValue.increment(1),
+        'likedBy': FieldValue.arrayRemove([myId]),
+        'likeCount': FieldValue.increment(-1),
       });
     } else {
       batch.update(myDoc, {
