@@ -99,7 +99,7 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
         'name': 'フリー',
         'price': '0',
         'features': [
-          {'title': 'メッセージ最大5人まで', 'desc': '最大5人の気になる相手と会話を始めることができます。'},
+          {'title': 'メッセージ最大5人／月', 'desc': '最大5人の気になる相手と会話を始めることができます。'},
         ],
         'color': Colors.grey,
       },
@@ -108,7 +108,7 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
         'name': 'ライト',
         'price': '250',
         'features': [
-          {'title': 'メッセージ最大15人まで', 'desc': '最大15人の気になる相手と会話を始めることができます。'},
+          {'title': 'メッセージ最大15人／月', 'desc': '最大15人の気になる相手と会話を始めることができます。'},
           {'title': '足跡の表示', 'desc': 'あなたのプロフィールを見た人がわかります。'},
         ],
         'color': const Color(0xFFFF9800), // オレンジ
@@ -148,12 +148,6 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
         ),
         elevation: 0,
         iconTheme: const IconThemeData(color: Colors.black87),
-        actions: [
-          TextButton(
-            onPressed: () {},
-            child: const Text('復元', style: TextStyle(color: Colors.grey)),
-          ),
-        ],
       ),
       body: _isLoadingPlan
           ? const Center(child: CircularProgressIndicator())

@@ -25,7 +25,6 @@ class ProfileDetailScreen extends StatefulWidget {
 class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
   final PageController _pageController = PageController();
   int _currentPage = 0;
-  bool _isLiked = false;
 
   // 💡 プラン別制限用の変数群
   String _myPlan = 'free'; // 'free', 'light', 'standard', etc.
@@ -37,7 +36,6 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
   void initState() {
     super.initState();
     _addFootprint();
-    _checkLikedStatus();
     _loadUserPlanAndLimits();
   }
 
@@ -276,7 +274,6 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
     final int cacheSize =
         (screenWidth * MediaQuery.of(context).devicePixelRatio).round();
 
-    const Color accentPink = Color(0xFFFF8A80);
     final data = widget.userData;
     final List<dynamic> imageUrls = data['imageUrls'] ?? [];
     final Map<String, dynamic> valuesData = Map<String, dynamic>.from(
@@ -425,246 +422,199 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
                 color: Colors.white,
                 borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
               ),
-              child: StreamBuilder<DocumentSnapshot>(
-                stream: FirebaseFirestore.instance
-                    .collection('users')
-                    .doc(widget.userId)
-                    .snapshots(),
-                builder: (context, snapshot) {
-                  final peerData = snapshot.hasData
-                      ? snapshot.data!.data() as Map<String, dynamic>
-                      : data;
-                  final int likeCount = peerData['likeCount'] ?? 0;
-
-                  return Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 20, 16, 16),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            InkWell(
-                              onTap: () {
-                                Clipboard.setData(
-                                  ClipboardData(text: widget.userId),
-                                );
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                    content: Text(
-                                      'ID: ${widget.userId.substring(0, 8)}... をコピーしました',
-                                    ),
-                                    behavior: SnackBarBehavior.floating,
-                                  ),
-                                );
-                              },
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Text(
-                                    'ID: ${widget.userId.substring(0, 8)}',
-                                    style: const TextStyle(
-                                      color: Colors.grey,
-                                      fontSize: 14,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                  const SizedBox(width: 4),
-                                  const Icon(
-                                    Icons.copy,
-                                    size: 14,
-                                    color: Colors.grey,
-                                  ),
-                                ],
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 20, 16, 8),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        InkWell(
+                          onTap: () {
+                            Clipboard.setData(
+                              ClipboardData(text: widget.userId),
+                            );
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  'ID: ${widget.userId.substring(0, 8)}... をコピーしました',
+                                ),
+                                behavior: SnackBarBehavior.floating,
                               ),
-                            ),
-                            Row(
-                              children: [
-                                Flexible(
-                                  child: Text(
-                                    '${data['name'] ?? ''}${_hasValue(data['age']) ? ' (${data['age']})' : ''}',
-                                    style: const TextStyle(
-                                      fontSize: 26,
-                                      fontWeight: FontWeight.bold,
-                                      height: 1.0,
-                                    ),
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
+                            );
+                          },
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                'ID: ${widget.userId.substring(0, 8)}',
+                                style: const TextStyle(
+                                  color: Colors.grey,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.bold,
                                 ),
-                                if (_hasValue(data['gender'])) ...[
-                                  const SizedBox(width: 8),
-                                  Builder(
-                                    builder: (context) {
-                                      final gender = data['gender'];
-                                      final Color bgColor = gender == '男性'
-                                          ? Colors.blue.withOpacity(0.15)
-                                          : (gender == '女性'
-                                                ? Colors.pink.withOpacity(0.15)
-                                                : Colors.grey.withOpacity(
-                                                    0.15,
-                                                  ));
-                                      final Color iconColor = gender == '男性'
-                                          ? Colors.blue
-                                          : (gender == '女性'
-                                                ? Colors.pink
-                                                : Colors.grey);
-                                      final IconData iconData = gender == '男性'
-                                          ? Icons.male
-                                          : (gender == '女性'
-                                                ? Icons.female
-                                                : Icons.transgender);
-
-                                      return Container(
-                                        padding: const EdgeInsets.all(4),
-                                        decoration: BoxDecoration(
-                                          color: bgColor,
-                                          shape: BoxShape.circle,
-                                        ),
-                                        child: Icon(
-                                          iconData,
-                                          color: iconColor,
-                                          size: 16,
-                                        ),
-                                      );
-                                    },
-                                  ),
-                                ],
-                                IconButton(
-                                  onPressed: _toggleLike,
-                                  icon: Icon(
-                                    _isLiked
-                                        ? Icons.thumb_up_alt
-                                        : Icons.thumb_up_alt_outlined,
-                                    color: accentPink,
-                                    size: 28,
-                                  ),
-                                  padding: EdgeInsets.zero,
-                                  constraints: const BoxConstraints(),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 8),
-                            Row(
-                              children: [
-                                const Icon(
-                                  Icons.thumb_up,
-                                  color: Colors.pink,
-                                  size: 16,
-                                ),
-                                const SizedBox(width: 4),
-                                Text(
-                                  '${likeCount < 0 ? 0 : likeCount} いいね',
-                                  style: const TextStyle(
-                                    color: Colors.grey,
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                      ),
-                      if (data['tags'] != null &&
-                          (data['tags'] as List).isNotEmpty)
-                        Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 16),
-                          child: Wrap(
-                            spacing: 6.0,
-                            children: (data['tags'] as List)
-                                .map(
-                                  (tag) =>
-                                      _buildTag(tag.toString(), AppColors.tag),
-                                )
-                                .toList(),
+                              ),
+                              const SizedBox(width: 4),
+                              const Icon(
+                                Icons.copy,
+                                size: 14,
+                                color: Colors.grey,
+                              ),
+                            ],
                           ),
                         ),
-                      if (_hasValue(data['bio'])) ...[
-                        _buildSectionTitle('自己紹介'),
-                        _buildContent(data['bio']),
-                      ],
-
-                      // 💡 趣味・好きなもの（必須項目・統合化に合わせてテキスト形式で美しく表示）
-                      if (_hasValue(data['hobby'])) ...[
-                        _buildSectionTitle('趣味・好きなもの'),
-                        _buildContent(data['hobby']),
-                      ],
-
-                      if (_hasValue(data['hobbyDetail'])) ...[
-                        _buildSectionTitle('趣味・好きなものの詳細'),
-                        _buildContent(data['hobbyDetail']),
-                      ],
-                      if (_hasValue(data['idealFriend'])) ...[
-                        _buildSectionTitle('どんな友達が欲しい？'),
-                        _buildContent(data['idealFriend']),
-                      ],
-
-                      // 基本情報 (性別、居住地、学校、職業)
-                      if (basicInfoTiles.isNotEmpty) ...[
-                        _buildSectionTitle('基本情報'),
-                        _buildInfoContainer(basicInfoTiles),
-                      ],
-
-                      if (_hasValue(data['favoriteFood']) ||
-                          _hasValue(data['dislikeFood']) ||
-                          _hasValue(data['artist']) ||
-                          _hasValue(data['game']) ||
-                          _hasValue(data['anime'])) ...[
-                        _buildSectionTitle('その他プロフィール'),
-                        _buildInfoContainer([
-                          if (_hasValue(data['favoriteFood']))
-                            _buildDetailTile(
-                              Icons.restaurant,
-                              '好きな食べ物',
-                              data['favoriteFood'],
-                            ),
-                          if (_hasValue(data['dislikeFood']))
-                            _buildDetailTile(
-                              Icons.no_food,
-                              '苦手な食べ物',
-                              data['dislikeFood'],
-                            ),
-                          if (_hasValue(data['artist']))
-                            _buildDetailTile(
-                              Icons.music_note,
-                              '好きなアーティスト',
-                              data['artist'],
-                            ),
-                          if (_hasValue(data['game']))
-                            _buildDetailTile(
-                              Icons.sports_esports,
-                              '好きなゲーム',
-                              data['game'],
-                            ),
-                          if (_hasValue(data['anime']))
-                            _buildDetailTile(
-                              Icons.movie,
-                              '好きなアニメ・漫画',
-                              data['anime'],
-                            ),
-                        ]),
-                      ],
-
-                      // 💡 ライフスタイル・価値観シート
-                      if (valuesData.isNotEmpty) ...[
-                        _buildSectionTitle('ライフスタイル・価値観シート'),
-                        _buildInfoContainer(
-                          valuesData.entries
-                              .map(
-                                (e) => _buildDetailTile(
-                                  Icons.check_circle_outline,
-                                  e.key,
-                                  e.value,
-                                  isValueSheet: true,
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                '${data['name'] ?? ''}${_hasValue(data['age']) ? ' (${data['age']})' : ''}',
+                                style: const TextStyle(
+                                  fontSize: 26,
+                                  fontWeight: FontWeight.bold,
+                                  height: 1.0,
                                 ),
-                              )
-                              .toList(),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            if (_hasValue(data['gender'])) ...[
+                              const SizedBox(width: 8),
+                              Builder(
+                                builder: (context) {
+                                  final gender = data['gender'];
+                                  final Color bgColor = gender == '男性'
+                                      ? Colors.blue.withOpacity(0.15)
+                                      : (gender == '女性'
+                                            ? Colors.pink.withOpacity(0.15)
+                                            : Colors.grey.withOpacity(0.15));
+                                  final Color iconColor = gender == '男性'
+                                      ? Colors.blue
+                                      : (gender == '女性'
+                                            ? Colors.pink
+                                            : Colors.grey);
+                                  final IconData iconData = gender == '男性'
+                                      ? Icons.male
+                                      : (gender == '女性'
+                                            ? Icons.female
+                                            : Icons.transgender);
+
+                                  return Container(
+                                    padding: const EdgeInsets.all(4),
+                                    decoration: BoxDecoration(
+                                      color: bgColor,
+                                      shape: BoxShape.circle,
+                                    ),
+                                    child: Icon(
+                                      iconData,
+                                      color: iconColor,
+                                      size: 16,
+                                    ),
+                                  );
+                                },
+                              ),
+                            ],
+                          ],
                         ),
                       ],
-                      const SizedBox(height: 20),
-                    ],
-                  );
-                },
+                    ),
+                  ),
+                  if (data['tags'] != null && (data['tags'] as List).isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: Wrap(
+                        spacing: 6.0,
+                        children: (data['tags'] as List)
+                            .map(
+                              (tag) => _buildTag(tag.toString(), AppColors.tag),
+                            )
+                            .toList(),
+                      ),
+                    ),
+                  if (_hasValue(data['bio'])) ...[
+                    _buildSectionTitle('自己紹介'),
+                    _buildContent(data['bio']),
+                  ],
+
+                  // 💡 趣味・好きなもの（必須項目・統合化に合わせてテキスト形式で美しく表示）
+                  if (_hasValue(data['hobby'])) ...[
+                    _buildSectionTitle('趣味・好きなもの'),
+                    _buildContent(data['hobby']),
+                  ],
+
+                  if (_hasValue(data['hobbyDetail'])) ...[
+                    _buildSectionTitle('趣味・好きなものの詳細'),
+                    _buildContent(data['hobbyDetail']),
+                  ],
+                  if (_hasValue(data['idealFriend'])) ...[
+                    _buildSectionTitle('どんな友達が欲しい？'),
+                    _buildContent(data['idealFriend']),
+                  ],
+
+                  // 基本情報 (性別、居住地、学校、職業)
+                  if (basicInfoTiles.isNotEmpty) ...[
+                    _buildSectionTitle('基本情報'),
+                    _buildInfoContainer(basicInfoTiles),
+                  ],
+
+                  if (_hasValue(data['favoriteFood']) ||
+                      _hasValue(data['dislikeFood']) ||
+                      _hasValue(data['artist']) ||
+                      _hasValue(data['game']) ||
+                      _hasValue(data['anime'])) ...[
+                    _buildSectionTitle('その他プロフィール'),
+                    _buildInfoContainer([
+                      if (_hasValue(data['favoriteFood']))
+                        _buildDetailTile(
+                          Icons.restaurant,
+                          '好きな食べ物',
+                          data['favoriteFood'],
+                        ),
+                      if (_hasValue(data['dislikeFood']))
+                        _buildDetailTile(
+                          Icons.no_food,
+                          '苦手な食べ物',
+                          data['dislikeFood'],
+                        ),
+                      if (_hasValue(data['artist']))
+                        _buildDetailTile(
+                          Icons.music_note,
+                          '好きなアーティスト',
+                          data['artist'],
+                        ),
+                      if (_hasValue(data['game']))
+                        _buildDetailTile(
+                          Icons.sports_esports,
+                          '好きなゲーム',
+                          data['game'],
+                        ),
+                      if (_hasValue(data['anime']))
+                        _buildDetailTile(
+                          Icons.movie,
+                          '好きなアニメ・漫画',
+                          data['anime'],
+                        ),
+                    ]),
+                  ],
+
+                  // 💡 ライフスタイル・価値観シート
+                  if (valuesData.isNotEmpty) ...[
+                    _buildSectionTitle('ライフスタイル・価値観シート'),
+                    _buildInfoContainer(
+                      valuesData.entries
+                          .map(
+                            (e) => _buildDetailTile(
+                              Icons.check_circle_outline,
+                              e.key,
+                              e.value,
+                              isValueSheet: true,
+                            ),
+                          )
+                          .toList(),
+                    ),
+                  ],
+                  const SizedBox(height: 20),
+                ],
               ),
             ),
           ],
@@ -822,55 +772,5 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
     } catch (e) {
       debugPrint('足跡の記録に失敗しました: $e');
     }
-  }
-
-  Future<void> _checkLikedStatus() async {
-    final String? myId = FirebaseAuth.instance.currentUser?.uid;
-    if (myId == null) return;
-
-    final myDoc = await FirebaseFirestore.instance
-        .collection('users')
-        .doc(myId)
-        .get();
-    final List<dynamic> myLikes = myDoc.data()?['likes'] ?? [];
-
-    if (mounted) {
-      setState(() {
-        _isLiked = myLikes.contains(widget.userId);
-      });
-    }
-  }
-
-  Future<void> _toggleLike() async {
-    final String myId = FirebaseAuth.instance.currentUser?.uid ?? '';
-    final String peerId = widget.userId;
-    final String? currentUserId = FirebaseAuth.instance.currentUser?.uid;
-    final bool isMyProfile = widget.userId == currentUserId;
-    if (myId.isEmpty || isMyProfile) return;
-
-    setState(() => _isLiked = !_isLiked);
-
-    final batch = FirebaseFirestore.instance.batch();
-    final myDoc = FirebaseFirestore.instance.collection('users').doc(myId);
-    final peerDoc = FirebaseFirestore.instance.collection('users').doc(peerId);
-
-    if (_isLiked) {
-      batch.update(myDoc, {
-        'likes': FieldValue.arrayUnion([peerId]),
-      });
-      batch.update(peerDoc, {
-        'likedBy': FieldValue.arrayRemove([myId]),
-        'likeCount': FieldValue.increment(-1),
-      });
-    } else {
-      batch.update(myDoc, {
-        'likes': FieldValue.arrayRemove([peerId]),
-      });
-      batch.update(peerDoc, {
-        'likedBy': FieldValue.arrayRemove([myId]),
-        'likeCount': FieldValue.increment(-1),
-      });
-    }
-    await batch.commit();
   }
 }

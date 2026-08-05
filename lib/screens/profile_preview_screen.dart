@@ -164,7 +164,7 @@ class _ProfilePreviewScreenState extends State<ProfilePreviewScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 20, 16, 16),
+                    padding: const EdgeInsets.fromLTRB(16, 20, 16, 8),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
@@ -253,13 +253,7 @@ class _ProfilePreviewScreenState extends State<ProfilePreviewScreen> {
                                   );
                                 },
                               ),
-                              const SizedBox(width: 8),
                             ],
-                            Icon(
-                              Icons.thumb_up_alt_outlined,
-                              color: accentPink,
-                              size: 28,
-                            ),
                           ],
                         ),
                       ],
@@ -270,7 +264,10 @@ class _ProfilePreviewScreenState extends State<ProfilePreviewScreen> {
                   if (widget.data['tags'] != null &&
                       (widget.data['tags'] as List).isNotEmpty)
                     Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 0,
+                      ),
                       child: Wrap(
                         spacing: 5.0,
                         runSpacing: 0.0,

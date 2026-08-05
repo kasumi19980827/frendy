@@ -93,12 +93,6 @@ class _SearchScreenState extends State<SearchScreen> {
 
                     final myData =
                         mySnapshot.data!.data() as Map<String, dynamic>? ?? {};
-                    final List<dynamic> myLikedList =
-                        (myData['likedUserIds'] is List)
-                        ? List<dynamic>.from(myData['likedUserIds'])
-                        : [];
-                    final List<dynamic> myBlockedList =
-                        myData['blockedUsers'] ?? [];
 
                     // 趣味・嗜好に関連するすべてのフィールド一覧
                     final List<String> hobbyFields = [
@@ -384,7 +378,6 @@ class _SearchScreenState extends State<SearchScreen> {
                                 context,
                                 userId: docs[index].id,
                                 data: data,
-                                myLikedList: myLikedList,
                               );
                             },
                           )
@@ -565,7 +558,6 @@ class _SearchScreenState extends State<SearchScreen> {
     BuildContext context, {
     required String userId,
     required Map<String, dynamic> data,
-    required List<dynamic> myLikedList,
   }) {
     final String name = data['name'] ?? '名前なし';
     final String age = data['age']?.toString() ?? '--';
@@ -611,34 +603,38 @@ class _SearchScreenState extends State<SearchScreen> {
                 borderRadius: const BorderRadius.vertical(
                   top: Radius.circular(20),
                 ),
-                child: imageUrl != null
-                    ? CachedNetworkImage(
-                        imageUrl: imageUrl,
-                        fit: BoxFit.cover,
-                        width: double.infinity,
-                        height: double.infinity,
-                        memCacheWidth: cacheWidth,
-                        placeholder: (context, url) =>
-                            Container(color: Colors.grey[50]),
-                        errorWidget: (context, url, error) => Container(
+                child: SizedBox(
+                  width: double.infinity,
+                  height: double.infinity,
+                  child: imageUrl != null
+                      ? CachedNetworkImage(
+                          imageUrl: imageUrl,
+                          fit: BoxFit.cover,
+                          width: double.infinity,
+                          height: double.infinity,
+                          memCacheWidth: cacheWidth,
+                          placeholder: (context, url) =>
+                              Container(color: Colors.grey[50]),
+                          errorWidget: (context, url, error) => Container(
+                            color: Colors.grey[100],
+                            child: const Icon(
+                              Icons.broken_image,
+                              size: 24,
+                              color: Colors.grey,
+                            ),
+                          ),
+                        )
+                      : Container(
                           color: Colors.grey[100],
-                          child: const Icon(
-                            Icons.broken_image,
-                            size: 24,
-                            color: Colors.grey,
+                          child: const Center(
+                            child: Icon(
+                              Icons.person,
+                              size: 40,
+                              color: Colors.grey,
+                            ),
                           ),
                         ),
-                      )
-                    : Container(
-                        color: Colors.grey[100],
-                        child: const Center(
-                          child: Icon(
-                            Icons.person,
-                            size: 40,
-                            color: Colors.grey,
-                          ),
-                        ),
-                      ),
+                ),
               ),
             ),
             Expanded(
