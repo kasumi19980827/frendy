@@ -6,7 +6,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:matching_app/constants/app_colors.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:matching_app/constants/app_tags.dart';
-import 'package:matching_app/screens/profile_preview_screen.dart';
+import 'package:matching_app/screens/profile/profile_preview_screen.dart';
 import 'dart:typed_data';
 
 class ProfileSetupScreen extends StatefulWidget {

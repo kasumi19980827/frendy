@@ -1,17 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart'; // 1. 追加
-import 'package:matching_app/screens/email_verification_pending_screen.dart';
+import 'package:matching_app/screens/auth/email_verification_pending_screen.dart';
 import 'firebase_options.dart';
 
 // 各画面のインポート（既存のもの）
-import 'package:matching_app/screens/friends_screen.dart';
-import 'package:matching_app/screens/home_screen.dart';
-import 'package:matching_app/screens/message_screen.dart';
-import 'package:matching_app/screens/mypage_screen.dart';
-import 'package:matching_app/screens/plaza_screen.dart';
-import 'package:matching_app/screens/search_screen.dart';
-import 'package:matching_app/screens/login_screen.dart'; // 2. 追加
+import 'package:matching_app/screens/friends/friends_screen.dart';
+import 'package:matching_app/screens/home/home_screen.dart';
+import 'package:matching_app/screens/talk/message_screen.dart';
+import 'package:matching_app/screens/mypage/mypage_screen.dart';
+import 'package:matching_app/screens/plaza/plaza_screen.dart';
+import 'package:matching_app/screens/search/search_screen.dart';
+import 'package:matching_app/screens/auth/login_screen.dart'; // 2. 追加
 import 'package:matching_app/constants/app_colors.dart';
 import 'package:flutter/services.dart';
 

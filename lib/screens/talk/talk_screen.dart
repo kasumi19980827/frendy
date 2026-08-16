@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'dart:ui'; // 💡 ぼかし効果(ImageFilter)を使用するためにインポート
-import 'package:matching_app/screens/identity_verification_screen.dart'; // 💡 年齢確認画面への遷移に必要
+import 'package:matching_app/screens/auth/identity_verification_screen.dart'; // 💡 年齢確認画面への遷移に必要
 
 class TalkScreen extends StatefulWidget {
   final String userName;

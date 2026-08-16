@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:matching_app/screens/admin_messages_screen.dart';
-import 'package:matching_app/screens/blocked_users_screen.dart';
+import 'package:matching_app/screens/settings/admin_messages_screen.dart';
+import 'package:matching_app/screens/settings/blocked_users_screen.dart';
 
 class AppSettingsScreen extends StatelessWidget {
   const AppSettingsScreen({super.key});

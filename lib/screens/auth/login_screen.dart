@@ -5,7 +5,7 @@ import 'package:google_sign_in/google_sign_in.dart';
 import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 import 'package:matching_app/constants/app_colors.dart';
 import 'package:matching_app/main.dart'; // scaffoldMessengerKey を使うためにインポート
-import 'package:matching_app/screens/email_verification_pending_screen.dart';
+import 'package:matching_app/screens/auth/email_verification_pending_screen.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});

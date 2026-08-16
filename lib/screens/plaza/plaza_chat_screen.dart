@@ -4,8 +4,8 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:matching_app/constants/app_colors.dart';
 import 'package:matching_app/models/chat_room.dart';
-import 'package:matching_app/screens/identity_verification_screen.dart';
-import 'package:matching_app/screens/profile_detail_screen.dart';
+import 'package:matching_app/screens/auth/identity_verification_screen.dart';
+import 'package:matching_app/screens/profile/profile_detail_screen.dart';
 
 class PlazaChatScreen extends StatefulWidget {
   final ChatRoom room;

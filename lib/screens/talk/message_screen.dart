@@ -3,8 +3,8 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:matching_app/constants/app_colors.dart';
 import 'package:matching_app/main.dart';
-import 'package:matching_app/screens/mypage_screen.dart';
-import 'package:matching_app/screens/talk_screen.dart';
+import 'package:matching_app/screens/mypage/mypage_screen.dart';
+import 'package:matching_app/screens/talk/talk_screen.dart';
 
 class MessageScreen extends StatelessWidget {
   const MessageScreen({super.key});

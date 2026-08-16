@@ -4,7 +4,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:matching_app/constants/app_colors.dart';
 import 'package:matching_app/constants/app_tags.dart';
-import 'package:matching_app/screens/profile_detail_screen.dart';
+import 'package:matching_app/screens/profile/profile_detail_screen.dart';
 
 class SearchScreen extends StatefulWidget {
   const SearchScreen({super.key});

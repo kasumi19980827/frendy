@@ -5,8 +5,8 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cached_network_image/cached_network_image.dart'; // ★追加：高機能キャッシュ画像ライブラリ
 import 'package:matching_app/constants/app_colors.dart';
-import 'package:matching_app/screens/talk_screen.dart' hide AppColors;
-import 'package:matching_app/screens/subscription_screen.dart'; // 💡 追加：メンバーシップ画面へ遷移させるため
+import 'package:matching_app/screens/talk/talk_screen.dart' hide AppColors;
+import 'package:matching_app/screens/subscription/subscription_screen.dart'; // 💡 追加：メンバーシップ画面へ遷移させるため
 
 class ProfileDetailScreen extends StatefulWidget {
   final Map<String, dynamic> userData; // Firestoreからのデータ

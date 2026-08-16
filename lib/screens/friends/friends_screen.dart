@@ -3,8 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:matching_app/constants/app_colors.dart';
-import 'package:matching_app/screens/profile_detail_screen.dart';
-import 'package:matching_app/screens/subscription_screen.dart';
+import 'package:matching_app/screens/profile/profile_detail_screen.dart';
+import 'package:matching_app/screens/subscription/subscription_screen.dart';
 
 class FriendsScreen extends StatefulWidget {
   const FriendsScreen({super.key});

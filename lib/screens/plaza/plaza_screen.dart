@@ -3,7 +3,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:matching_app/constants/app_colors.dart';
 import 'package:matching_app/models/chat_room.dart';
-import 'package:matching_app/screens/plaza_chat_screen.dart';
+import 'package:matching_app/screens/plaza/plaza_chat_screen.dart';
 
 class PlazaScreen extends StatefulWidget {
   const PlazaScreen({super.key});
