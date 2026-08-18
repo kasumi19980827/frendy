@@ -7,7 +7,7 @@ import 'package:google_sign_in/google_sign_in.dart';
 import 'package:matching_app/main.dart';
 import 'package:matching_app/screens/auth/identity_verification_screen.dart';
 import 'package:matching_app/screens/auth/login_screen.dart';
-import 'package:matching_app/screens/auth/profile_setup_screen.dart';
+import 'package:matching_app/screens/profile/profile_setup_screen.dart';
 import 'package:matching_app/screens/settings/help_support_screen.dart';
 import 'package:matching_app/screens/subscription/subscription_screen.dart';
 import 'package:matching_app/screens/settings/app_settings_screen.dart';

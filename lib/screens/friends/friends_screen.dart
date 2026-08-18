@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -5,6 +6,15 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:matching_app/constants/app_colors.dart';
 import 'package:matching_app/screens/profile/profile_detail_screen.dart';
 import 'package:matching_app/screens/subscription/subscription_screen.dart';
+
+// 💡 ユーザー一括取得結果のキャッシュ用コンテナ。
+//    同じID集合であれば再フェッチせず使い回すことで、
+//    無関係な状態更新のたびにFirestoreへ再読み込みしに行くのを防ぐ
+class _CachedUserFetch {
+  final String idsSignature;
+  final Future<Map<String, Map<String, dynamic>>> future;
+  _CachedUserFetch(this.idsSignature, this.future);
+}
 
 class FriendsScreen extends StatefulWidget {
   const FriendsScreen({super.key});
@@ -16,6 +26,68 @@ class FriendsScreen extends StatefulWidget {
 class _FriendsScreenState extends State<FriendsScreen> {
   String _selectedMenu = '友達一覧';
   final String myId = FirebaseAuth.instance.currentUser?.uid ?? '';
+
+  static const Duration _networkTimeout = Duration(seconds: 20);
+  static const int _whereInChunkSize = 30; // FirestoreのwhereIn上限に合わせる
+
+  // 💡 リストごとのユーザー情報キャッシュ（友達一覧／申請一覧／いいね等を個別管理）
+  final Map<String, _CachedUserFetch> _fetchCaches = {};
+
+  // 💡 処理中の友達申請IDを保持し、二重承認を防ぐ
+  final Set<String> _processingRequestIds = {};
+
+  // --- Firestoreからユーザー情報をまとめて取得する（N+1問題対策） ---
+  Future<Map<String, Map<String, dynamic>>> _fetchUsersByIds(
+    List<String> ids,
+  ) async {
+    if (ids.isEmpty) return {};
+
+    final Map<String, Map<String, dynamic>> result = {};
+
+    // 💡 FirestoreのwhereInは最大30件までのため、チャンクに分割してまとめて取得する。
+    //    1件ずつ取得する場合に比べ、ネットワークのラウンドトリップ回数を大幅に削減できる
+    for (int i = 0; i < ids.length; i += _whereInChunkSize) {
+      final int end = (i + _whereInChunkSize < ids.length)
+          ? i + _whereInChunkSize
+          : ids.length;
+      final List<String> chunk = ids.sublist(i, end);
+
+      try {
+        final snapshot = await FirebaseFirestore.instance
+            .collection('users')
+            .where(FieldPath.documentId, whereIn: chunk)
+            .get()
+            .timeout(_networkTimeout);
+
+        for (final doc in snapshot.docs) {
+          result[doc.id] = doc.data();
+        }
+      } catch (e) {
+        debugPrint('ユーザー一括取得エラー: $e');
+        // 💡 一部チャンクの取得に失敗しても、他の結果は表示できるよう処理を継続する
+      }
+    }
+    return result;
+  }
+
+  // 💡 ID集合が前回と同じであれば、Futureを再生成せずキャッシュを返す
+  Future<Map<String, Map<String, dynamic>>> _getUsersCached(
+    String cacheKey,
+    List<String> ids,
+  ) {
+    final String idsSignature = (List<String>.from(ids)..sort()).join(',');
+    final _CachedUserFetch? existing = _fetchCaches[cacheKey];
+
+    if (existing != null && existing.idsSignature == idsSignature) {
+      return existing.future;
+    }
+
+    final Future<Map<String, Map<String, dynamic>>> future = _fetchUsersByIds(
+      ids,
+    );
+    _fetchCaches[cacheKey] = _CachedUserFetch(idsSignature, future);
+    return future;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -164,29 +236,38 @@ class _FriendsScreenState extends State<FriendsScreen> {
           .doc(myId)
           .snapshots(),
       builder: (context, snapshot) {
-        if (!snapshot.hasData)
+        if (!snapshot.hasData) {
           return const Center(child: CircularProgressIndicator());
+        }
         final myData = snapshot.data!.data() as Map<String, dynamic>? ?? {};
-        final List<dynamic> friendsIds = myData['friends'] ?? [];
+        final List<String> friendsIds = List<String>.from(
+          myData['friends'] ?? [],
+        );
 
-        if (friendsIds.isEmpty)
+        if (friendsIds.isEmpty) {
           return const Center(
             child: Text('まだ友達がいません', style: TextStyle(color: Colors.grey)),
           );
+        }
 
-        return ListView.builder(
-          itemCount: friendsIds.length,
-          itemBuilder: (context, index) {
-            final String peerId = friendsIds[index];
-            return FutureBuilder<DocumentSnapshot>(
-              future: FirebaseFirestore.instance
-                  .collection('users')
-                  .doc(peerId)
-                  .get(),
-              builder: (context, userSnap) {
-                if (!userSnap.hasData) return const SizedBox();
-                final userData =
-                    userSnap.data!.data() as Map<String, dynamic>? ?? {};
+        // 💡 1件ずつ取得するのではなく、まとめて取得してN+1問題を回避する
+        return FutureBuilder<Map<String, Map<String, dynamic>>>(
+          future: _getUsersCached('friends', friendsIds),
+          builder: (context, userMapSnap) {
+            if (!userMapSnap.hasData) {
+              return const Center(child: CircularProgressIndicator());
+            }
+            final Map<String, Map<String, dynamic>> userMap = userMapSnap.data!;
+
+            return ListView.builder(
+              itemCount: friendsIds.length,
+              itemBuilder: (context, index) {
+                final String peerId = friendsIds[index];
+                final userData = userMap[peerId];
+
+                // 💡 退会済み等でユーザー情報が取得できない場合は表示をスキップする
+                if (userData == null) return const SizedBox.shrink();
+
                 final String name = userData['name'] ?? 'ユーザー';
                 final String imageUrl =
                     (userData['imageUrls'] as List?)?.isNotEmpty == true
@@ -261,7 +342,7 @@ class _FriendsScreenState extends State<FriendsScreen> {
     );
   }
 
-  // --- 2. 友達申請リスト（承認ボタンを小サイズ化） ---
+  // --- 2. 友達申請リスト ---
   Widget _buildRequestList() {
     return StreamBuilder<QuerySnapshot>(
       stream: FirebaseFirestore.instance
@@ -270,35 +351,48 @@ class _FriendsScreenState extends State<FriendsScreen> {
           .where('status', isEqualTo: 'pending')
           .snapshots(),
       builder: (context, snapshot) {
-        if (!snapshot.hasData)
+        if (!snapshot.hasData) {
           return const Center(child: CircularProgressIndicator());
+        }
         final docs = snapshot.data!.docs;
-        if (docs.isEmpty)
+        if (docs.isEmpty) {
           return const Center(
             child: Text('届いている申請はありません', style: TextStyle(color: Colors.grey)),
           );
+        }
 
-        return ListView.builder(
-          itemCount: docs.length,
-          itemBuilder: (context, index) {
-            final requestData = docs[index].data() as Map<String, dynamic>;
-            final String fromId = requestData['fromId'];
-            final String requestId = docs[index].id;
+        final List<String> fromIds = docs
+            .map((d) => (d.data() as Map<String, dynamic>)['fromId'] as String)
+            .toList();
 
-            return FutureBuilder<DocumentSnapshot>(
-              future: FirebaseFirestore.instance
-                  .collection('users')
-                  .doc(fromId)
-                  .get(),
-              builder: (context, userSnap) {
-                if (!userSnap.hasData) return const SizedBox();
-                final userData =
-                    userSnap.data!.data() as Map<String, dynamic>? ?? {};
+        // 💡 各申請者の情報も個別取得ではなく一括取得する
+        return FutureBuilder<Map<String, Map<String, dynamic>>>(
+          future: _getUsersCached('requests', fromIds),
+          builder: (context, userMapSnap) {
+            if (!userMapSnap.hasData) {
+              return const Center(child: CircularProgressIndicator());
+            }
+            final Map<String, Map<String, dynamic>> userMap = userMapSnap.data!;
+
+            return ListView.builder(
+              itemCount: docs.length,
+              itemBuilder: (context, index) {
+                final requestData = docs[index].data() as Map<String, dynamic>;
+                final String fromId = requestData['fromId'];
+                final String requestId = docs[index].id;
+                final userData = userMap[fromId];
+
+                if (userData == null) return const SizedBox.shrink();
+
                 final String name = userData['name'] ?? 'ユーザー';
                 final String imageUrl =
                     (userData['imageUrls'] as List?)?.isNotEmpty == true
                     ? userData['imageUrls'][0]
                     : '';
+
+                final bool isProcessing = _processingRequestIds.contains(
+                  requestId,
+                );
 
                 return ListTile(
                   leading: CircleAvatar(
@@ -307,33 +401,43 @@ class _FriendsScreenState extends State<FriendsScreen> {
                         : null,
                   ),
                   title: Text(name),
-                  // 💡 承認ボタンを右寄せしつつ、サイズを綺麗に小さくコントロール
-                  trailing: ElevatedButton(
-                    onPressed: () =>
-                        _acceptFriendRequest(fromId, name, requestId),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: AppColors.bg,
-                      elevation: 0, // フラットにしてすっきり見せる
-                      // 💡 ボタンの縦横の最小サイズを低く指定 (横64, 縦30)
-                      minimumSize: const Size(64, 30),
-                      // 💡 内側の余白を狭めて文字がギリギリ収まるサイズに
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 0,
+                  trailing: SizedBox(
+                    width: 64,
+                    height: 30,
+                    child: ElevatedButton(
+                      onPressed: isProcessing
+                          ? null
+                          : () => _acceptFriendRequest(fromId, name, requestId),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppColors.bg,
+                        disabledBackgroundColor: Colors.grey[300],
+                        elevation: 0,
+                        minimumSize: const Size(64, 30),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 0,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(20),
+                        ),
                       ),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(
-                          20,
-                        ), // 丸みを強くしてコンパクト感を強調
-                      ),
-                    ),
-                    child: const Text(
-                      '承認',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold,
-                      ),
+                      child: isProcessing
+                          ? const SizedBox(
+                              width: 14,
+                              height: 14,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            )
+                          : const Text(
+                              '承認',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
                     ),
                   ),
                 );
@@ -358,18 +462,30 @@ class _FriendsScreenState extends State<FriendsScreen> {
           .doc(myId)
           .snapshots(),
       builder: (context, snapshot) {
-        if (!snapshot.hasData)
+        if (!snapshot.hasData) {
           return const Center(child: CircularProgressIndicator());
+        }
         final myData = snapshot.data!.data() as Map<String, dynamic>? ?? {};
-        final List<dynamic> userIds = myData[fieldName] ?? [];
 
-        if (userIds.isEmpty)
+        final List<dynamic> rawIds = myData[fieldName] ?? [];
+        final List<dynamic> myBlocks = myData['blocks'] ?? [];
+        final List<dynamic> blockedBy = myData['blockedBy'] ?? [];
+
+        // 💡 ブロック済み・ブロックされたユーザーは、いいね/足跡一覧からも除外する。
+        //    ブロック機能の「お互いのリストに表示されなくなる」という仕様に合わせるための修正
+        final List<String> userIds = rawIds
+            .map((e) => e.toString())
+            .where((id) => !myBlocks.contains(id) && !blockedBy.contains(id))
+            .toList();
+
+        if (userIds.isEmpty) {
           return Center(
             child: Text(
               emptyMessage,
               style: const TextStyle(color: Colors.grey),
             ),
           );
+        }
 
         // 💡 リアルタイムのFirestoreスナップショットから直接プランを判定
         //    → プラン変更が即座に反映され、ホットリロード不要になる
@@ -381,19 +497,21 @@ class _FriendsScreenState extends State<FriendsScreen> {
             (isFootprints && livePlan == 'free') ||
             (isLikeList && (livePlan == 'free' || livePlan == 'light'));
 
-        return ListView.builder(
-          itemCount: userIds.length,
-          itemBuilder: (context, index) {
-            final String peerId = userIds[index];
-            return FutureBuilder<DocumentSnapshot>(
-              future: FirebaseFirestore.instance
-                  .collection('users')
-                  .doc(peerId)
-                  .get(),
-              builder: (context, userSnap) {
-                if (!userSnap.hasData) return const SizedBox();
-                final userData =
-                    userSnap.data!.data() as Map<String, dynamic>? ?? {};
+        return FutureBuilder<Map<String, Map<String, dynamic>>>(
+          future: _getUsersCached(fieldName, userIds),
+          builder: (context, userMapSnap) {
+            if (!userMapSnap.hasData) {
+              return const Center(child: CircularProgressIndicator());
+            }
+            final Map<String, Map<String, dynamic>> userMap = userMapSnap.data!;
+
+            return ListView.builder(
+              itemCount: userIds.length,
+              itemBuilder: (context, index) {
+                final String peerId = userIds[index];
+                final userData = userMap[peerId];
+                if (userData == null) return const SizedBox.shrink();
+
                 final String name = userData['name'] ?? 'ユーザー';
                 final bool hasImage =
                     (userData['imageUrls'] as List?)?.isNotEmpty == true;
@@ -689,141 +807,240 @@ class _FriendsScreenState extends State<FriendsScreen> {
 
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: Colors.white,
-        surfaceTintColor: Colors.white,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-        title: Text(
-          '$name さんを通報',
-          textAlign: TextAlign.center,
-          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text(
-              '不適切な言動や規約違反がありましたか？\n理由を詳しく教えてください。',
-              style: TextStyle(fontSize: 12, color: Colors.grey, height: 1.5),
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 20),
-            TextField(
-              controller: reportController,
-              maxLines: 4,
-              style: const TextStyle(fontSize: 14),
-              decoration: InputDecoration(
-                hintText: '通報理由を入力...',
-                filled: true,
-                fillColor: Colors.grey[50],
-                contentPadding: const EdgeInsets.all(16),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(16),
-                  borderSide: BorderSide(color: Colors.grey[200]!),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(16),
-                  borderSide: const BorderSide(
-                    color: Colors.redAccent,
-                    width: 1.5,
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
-        actionsPadding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
-        actions: [
-          Row(
-            children: [
-              Expanded(
-                child: TextButton(
-                  onPressed: () => Navigator.pop(context),
-                  child: const Text(
-                    'キャンセル',
-                    style: TextStyle(
-                      color: Colors.grey,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: ElevatedButton(
-                  onPressed: () async {
-                    final String reason = reportController.text.trim();
-                    if (reason.isEmpty) return;
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) {
+          bool isSubmitting = false;
 
-                    await FirebaseFirestore.instance.collection('reports').add({
-                      'reporterId': currentUserId,
-                      'reportedId': peerId,
-                      'reason': reason,
-                      'createdAt': FieldValue.serverTimestamp(),
-                    });
+          Future<void> handleSubmit() async {
+            final String reason = reportController.text.trim();
+            if (reason.isEmpty || isSubmitting) return;
 
-                    if (context.mounted) {
-                      Navigator.pop(context);
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('報告ありがとうございます。運営で確認いたします。'),
-                          behavior: SnackBarBehavior.floating,
-                        ),
-                      );
-                    }
-                  },
-                  style: ElevatedButton.styleFrom(
+            setDialogState(() => isSubmitting = true);
+
+            try {
+              await FirebaseFirestore.instance
+                  .collection('reports')
+                  .add({
+                    'reporterId': currentUserId,
+                    'reportedId': peerId,
+                    'reason': reason,
+                    'createdAt': FieldValue.serverTimestamp(),
+                  })
+                  .timeout(_networkTimeout);
+
+              if (dialogContext.mounted) {
+                Navigator.pop(dialogContext);
+              }
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('報告ありがとうございます。運営で確認いたします。'),
+                    behavior: SnackBarBehavior.floating,
+                  ),
+                );
+              }
+            } catch (e) {
+              debugPrint('通報送信エラー: $e');
+              setDialogState(() => isSubmitting = false);
+              if (dialogContext.mounted) {
+                ScaffoldMessenger.of(dialogContext).showSnackBar(
+                  const SnackBar(
+                    content: Text('通報の送信に失敗しました。もう一度お試しください。'),
                     backgroundColor: Colors.redAccent,
-                    foregroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
+                  ),
+                );
+              }
+            }
+          }
+
+          return AlertDialog(
+            backgroundColor: Colors.white,
+            surfaceTintColor: Colors.white,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(24),
+            ),
+            title: Text(
+              '$name さんを通報',
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  '不適切な言動や規約違反がありましたか？\n理由を詳しく教えてください。',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Colors.grey,
+                    height: 1.5,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 20),
+                TextField(
+                  controller: reportController,
+                  maxLines: 4,
+                  maxLength: 500,
+                  style: const TextStyle(fontSize: 14),
+                  decoration: InputDecoration(
+                    hintText: '通報理由を入力...',
+                    filled: true,
+                    fillColor: Colors.grey[50],
+                    contentPadding: const EdgeInsets.all(16),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(16),
+                      borderSide: BorderSide(color: Colors.grey[200]!),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(16),
+                      borderSide: const BorderSide(
+                        color: Colors.redAccent,
+                        width: 1.5,
+                      ),
                     ),
                   ),
-                  child: const Text(
-                    '通報する',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
                 ),
+              ],
+            ),
+            actionsPadding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+            actions: [
+              Row(
+                children: [
+                  Expanded(
+                    child: TextButton(
+                      onPressed: isSubmitting
+                          ? null
+                          : () => Navigator.pop(dialogContext),
+                      child: const Text(
+                        'キャンセル',
+                        style: TextStyle(
+                          color: Colors.grey,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: ElevatedButton(
+                      onPressed: isSubmitting ? null : handleSubmit,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.redAccent,
+                        foregroundColor: Colors.white,
+                        disabledBackgroundColor: Colors.grey[300],
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      child: isSubmitting
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            )
+                          : const Text(
+                              '通報する',
+                              style: TextStyle(fontWeight: FontWeight.bold),
+                            ),
+                    ),
+                  ),
+                ],
               ),
             ],
-          ),
-        ],
+          );
+        },
       ),
     );
   }
 
   // 友達解除
   Future<void> _removeFriend(String peerId, String peerName) async {
-    final batch = FirebaseFirestore.instance.batch();
-    batch.update(FirebaseFirestore.instance.collection('users').doc(myId), {
-      'friends': FieldValue.arrayRemove([peerId]),
-    });
-    batch.update(FirebaseFirestore.instance.collection('users').doc(peerId), {
-      'friends': FieldValue.arrayRemove([myId]),
-    });
-    await batch.commit();
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text('$peerName さんの登録を解除しました')));
+    try {
+      final batch = FirebaseFirestore.instance.batch();
+      batch.update(FirebaseFirestore.instance.collection('users').doc(myId), {
+        'friends': FieldValue.arrayRemove([peerId]),
+      });
+      batch.update(FirebaseFirestore.instance.collection('users').doc(peerId), {
+        'friends': FieldValue.arrayRemove([myId]),
+      });
+      await batch.commit().timeout(_networkTimeout);
+
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('$peerName さんの登録を解除しました')));
+      }
+    } catch (e) {
+      debugPrint('友達解除エラー: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('解除に失敗しました。もう一度お試しください。')));
+      }
+    }
   }
 
-  // 友達申請の承認
+  // 友達申請の承認（トランザクションで二重承認を防止）
   Future<void> _acceptFriendRequest(
     String userId,
     String name,
     String requestId,
   ) async {
-    final batch = FirebaseFirestore.instance.batch();
-    batch.update(FirebaseFirestore.instance.collection('users').doc(myId), {
-      'friends': FieldValue.arrayUnion([userId]),
-    });
-    batch.update(FirebaseFirestore.instance.collection('users').doc(userId), {
-      'friends': FieldValue.arrayUnion([myId]),
-    });
-    batch.delete(
-      FirebaseFirestore.instance.collection('friend_requests').doc(requestId),
-    );
-    await batch.commit();
-    setState(() => _selectedMenu = '友達一覧');
+    if (_processingRequestIds.contains(requestId)) return;
+    setState(() => _processingRequestIds.add(requestId));
+
+    try {
+      await FirebaseFirestore.instance
+          .runTransaction((transaction) async {
+            final requestRef = FirebaseFirestore.instance
+                .collection('friend_requests')
+                .doc(requestId);
+            final requestSnap = await transaction.get(requestRef);
+
+            // 💡 既に他の操作で処理済みの申請でないかをトランザクション内で確認する
+            if (!requestSnap.exists) {
+              throw Exception('この申請は既に処理されています');
+            }
+            final data = requestSnap.data() as Map<String, dynamic>;
+            if (data['status'] != 'pending') {
+              throw Exception('この申請は既に処理されています');
+            }
+
+            final myRef = FirebaseFirestore.instance
+                .collection('users')
+                .doc(myId);
+            final peerRef = FirebaseFirestore.instance
+                .collection('users')
+                .doc(userId);
+
+            transaction.update(myRef, {
+              'friends': FieldValue.arrayUnion([userId]),
+            });
+            transaction.update(peerRef, {
+              'friends': FieldValue.arrayUnion([myId]),
+            });
+            transaction.delete(requestRef);
+          })
+          .timeout(_networkTimeout);
+
+      if (mounted) {
+        setState(() => _selectedMenu = '友達一覧');
+      }
+    } catch (e) {
+      debugPrint('友達申請承認エラー: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('申請の承認に失敗しました。もう一度お試しください。')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _processingRequestIds.remove(requestId));
+      }
+    }
   }
 
   // --- ブロック確認ダイアログ ---
@@ -861,29 +1078,34 @@ class _FriendsScreenState extends State<FriendsScreen> {
 
   // --- ブロック実行 (Firestore更新) ---
   Future<void> _blockUser(String peerId, String peerName) async {
-    final batch = FirebaseFirestore.instance.batch();
-
-    // 1. 自分の「ブロックリスト(blocks)」に追加し、友達から削除
-    batch.update(FirebaseFirestore.instance.collection('users').doc(myId), {
-      'blocks': FieldValue.arrayUnion([peerId]),
-      'friends': FieldValue.arrayRemove([peerId]),
-    });
-
-    // 2. 相手の「ブロックされたリスト(blockedBy)」に追加し、友達から削除
-    batch.update(FirebaseFirestore.instance.collection('users').doc(peerId), {
-      'blockedBy': FieldValue.arrayUnion([myId]),
-      'friends': FieldValue.arrayRemove([myId]),
-    });
-
     try {
-      await batch.commit();
+      final batch = FirebaseFirestore.instance.batch();
+
+      // 1. 自分の「ブロックリスト(blocks)」に追加し、友達から削除
+      batch.update(FirebaseFirestore.instance.collection('users').doc(myId), {
+        'blocks': FieldValue.arrayUnion([peerId]),
+        'friends': FieldValue.arrayRemove([peerId]),
+      });
+
+      // 2. 相手の「ブロックされたリスト(blockedBy)」に追加し、友達から削除
+      batch.update(FirebaseFirestore.instance.collection('users').doc(peerId), {
+        'blockedBy': FieldValue.arrayUnion([myId]),
+        'friends': FieldValue.arrayRemove([myId]),
+      });
+
+      await batch.commit().timeout(_networkTimeout);
       if (mounted) {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('$peerName さんをブロックしました')));
       }
     } catch (e) {
-      debugPrint('Block Error: $e');
+      debugPrint('ブロックエラー: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('ブロックに失敗しました。もう一度お試しください。')),
+        );
+      }
     }
   }
 }
