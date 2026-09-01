@@ -37,7 +37,6 @@ class _ProfilePreviewScreenState extends State<ProfilePreviewScreen> {
   @override
   Widget build(BuildContext context) {
     final double screenWidth = MediaQuery.of(context).size.width;
-    const Color accentPink = Color(0xFFFF8A80);
 
     final List<dynamic> rawImages = widget.data['imageUrls'] ?? [];
     final List<dynamic> displayList = rawImages
@@ -54,7 +53,7 @@ class _ProfilePreviewScreenState extends State<ProfilePreviewScreen> {
     );
 
     // --- セクションごとの表示判定用リスト作成 ---
-    // 💡 削除された不要な項目（資格・サークルなど）を排除し、本当に必要な項目にスリム化！
+    // 💡 学校・職業欄は編集画面から削除されたため、性別・居住地のみに整理
     final List<Widget> basicInfoTiles = [];
     if (_hasValue(widget.data['gender'])) {
       basicInfoTiles.add(
@@ -64,16 +63,6 @@ class _ProfilePreviewScreenState extends State<ProfilePreviewScreen> {
     if (_hasValue(widget.data['location'])) {
       basicInfoTiles.add(
         _buildDetailTile(Icons.location_on, '居住地', widget.data['location']),
-      );
-    }
-    if (_hasValue(widget.data['school'])) {
-      basicInfoTiles.add(
-        _buildDetailTile(Icons.school, '学校', widget.data['school']),
-      );
-    }
-    if (_hasValue(widget.data['work'])) {
-      basicInfoTiles.add(
-        _buildDetailTile(Icons.work, '職業', widget.data['work']),
       );
     }
 
@@ -279,64 +268,28 @@ class _ProfilePreviewScreenState extends State<ProfilePreviewScreen> {
                       ),
                     ),
 
-                  // 自己紹介
-                  if (_hasValue(widget.data['bio'])) ...[
-                    _buildSectionTitle('自己紹介'),
-                    _buildContent(widget.data['bio']),
-                  ],
-
+                  // 💡 「好きなこと（趣味）」に名称変更（旧: 趣味・好きなこと）
                   if (_hasValue(widget.data['hobby'])) ...[
-                    _buildSectionTitle('趣味・好きなこと'),
+                    _buildSectionTitle('好きなこと（趣味）'),
                     _buildContent(widget.data['hobby']),
                   ],
-                  if (_hasValue(widget.data['hobbyDetail'])) ...[
-                    _buildSectionTitle('趣味・好きなことの詳細'),
-                    _buildContent(widget.data['hobbyDetail']),
+
+                  // 💡 「趣味・好きなことの詳細」を削除し、「最近特にハマってること」に置き換え
+                  if (_hasValue(widget.data['recentInterest'])) ...[
+                    _buildSectionTitle('最近特にハマってること'),
+                    _buildContent(widget.data['recentInterest']),
                   ],
+
                   if (_hasValue(widget.data['idealFriend'])) ...[
                     _buildSectionTitle('どんな友達が欲しい？'),
                     _buildContent(widget.data['idealFriend']),
                   ],
 
-                  // 基本情報
+                  // 基本情報（性別・居住地のみ）
                   if (basicInfoTiles.isNotEmpty) ...[
                     _buildSectionTitle('基本情報'),
                     _buildInfoContainer(basicInfoTiles),
                   ],
-
-                  _buildSectionTitle('その他プロフィール'),
-                  _buildInfoContainer([
-                    if (_hasValue(widget.data['favoriteFood']))
-                      _buildDetailTile(
-                        Icons.restaurant,
-                        '好きな食べ物',
-                        widget.data['favoriteFood'],
-                      ),
-                    if (_hasValue(widget.data['dislikeFood']))
-                      _buildDetailTile(
-                        Icons.no_food,
-                        '苦手な食べ物',
-                        widget.data['dislikeFood'],
-                      ),
-                    if (_hasValue(widget.data['artist']))
-                      _buildDetailTile(
-                        Icons.music_note,
-                        '好きなアーティスト',
-                        widget.data['artist'],
-                      ),
-                    if (_hasValue(widget.data['game']))
-                      _buildDetailTile(
-                        Icons.sports_esports,
-                        '好きなゲーム',
-                        widget.data['game'],
-                      ),
-                    if (_hasValue(widget.data['anime']))
-                      _buildDetailTile(
-                        Icons.movie,
-                        '好きなアニメ・漫画',
-                        widget.data['anime'],
-                      ),
-                  ]),
 
                   // 💡 ライフスタイル・価値観シート
                   if (valuesData.isNotEmpty) ...[

@@ -281,7 +281,7 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
     );
 
     // --- セクションごとの表示判定用リスト作成 ---
-    // 💡 不要な項目（資格・部活・サークルなど）を排除し、本当に必要な項目にスリム化！
+    // 💡 学校・職業欄は編集画面から削除されたため、性別・居住地のみに整理
     final List<Widget> basicInfoTiles = [];
     if (_hasValue(data['gender'])) {
       basicInfoTiles.add(_buildDetailTile(Icons.wc, '性別', data['gender']));
@@ -290,12 +290,6 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
       basicInfoTiles.add(
         _buildDetailTile(Icons.location_on, '居住地', data['location']),
       );
-    }
-    if (_hasValue(data['school'])) {
-      basicInfoTiles.add(_buildDetailTile(Icons.school, '学校', data['school']));
-    }
-    if (_hasValue(data['work'])) {
-      basicInfoTiles.add(_buildDetailTile(Icons.work, '職業', data['work']));
     }
 
     // 💡 今月の新規トーク開始枠の上限に達しているかどうかを判定
@@ -531,70 +525,28 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
                             .toList(),
                       ),
                     ),
-                  if (_hasValue(data['bio'])) ...[
-                    _buildSectionTitle('自己紹介'),
-                    _buildContent(data['bio']),
-                  ],
 
-                  // 💡 趣味・好きなもの（必須項目・統合化に合わせてテキスト形式で美しく表示）
+                  // 💡 「趣味・好きなもの」→「好きなこと（趣味）」に名称変更
                   if (_hasValue(data['hobby'])) ...[
-                    _buildSectionTitle('趣味・好きなもの'),
+                    _buildSectionTitle('好きなこと（趣味）'),
                     _buildContent(data['hobby']),
                   ],
 
-                  if (_hasValue(data['hobbyDetail'])) ...[
-                    _buildSectionTitle('趣味・好きなものの詳細'),
-                    _buildContent(data['hobbyDetail']),
+                  // 💡 「趣味・好きなものの詳細」を削除し、「最近特にハマってること」に置き換え
+                  if (_hasValue(data['recentInterest'])) ...[
+                    _buildSectionTitle('最近特にハマってること'),
+                    _buildContent(data['recentInterest']),
                   ],
+
                   if (_hasValue(data['idealFriend'])) ...[
                     _buildSectionTitle('どんな友達が欲しい？'),
                     _buildContent(data['idealFriend']),
                   ],
 
-                  // 基本情報 (性別、居住地、学校、職業)
+                  // 基本情報（性別・居住地のみ）
                   if (basicInfoTiles.isNotEmpty) ...[
                     _buildSectionTitle('基本情報'),
                     _buildInfoContainer(basicInfoTiles),
-                  ],
-
-                  if (_hasValue(data['favoriteFood']) ||
-                      _hasValue(data['dislikeFood']) ||
-                      _hasValue(data['artist']) ||
-                      _hasValue(data['game']) ||
-                      _hasValue(data['anime'])) ...[
-                    _buildSectionTitle('その他プロフィール'),
-                    _buildInfoContainer([
-                      if (_hasValue(data['favoriteFood']))
-                        _buildDetailTile(
-                          Icons.restaurant,
-                          '好きな食べ物',
-                          data['favoriteFood'],
-                        ),
-                      if (_hasValue(data['dislikeFood']))
-                        _buildDetailTile(
-                          Icons.no_food,
-                          '苦手な食べ物',
-                          data['dislikeFood'],
-                        ),
-                      if (_hasValue(data['artist']))
-                        _buildDetailTile(
-                          Icons.music_note,
-                          '好きなアーティスト',
-                          data['artist'],
-                        ),
-                      if (_hasValue(data['game']))
-                        _buildDetailTile(
-                          Icons.sports_esports,
-                          '好きなゲーム',
-                          data['game'],
-                        ),
-                      if (_hasValue(data['anime']))
-                        _buildDetailTile(
-                          Icons.movie,
-                          '好きなアニメ・漫画',
-                          data['anime'],
-                        ),
-                    ]),
                   ],
 
                   // 💡 ライフスタイル・価値観シート
