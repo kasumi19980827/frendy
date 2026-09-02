@@ -94,15 +94,12 @@ class _SearchScreenState extends State<SearchScreen> {
                     final myData =
                         mySnapshot.data!.data() as Map<String, dynamic>? ?? {};
 
-                    // 趣味・嗜好に関連するすべてのフィールド一覧
+                    // 💡 趣味・嗜好に関連するフィールド一覧
+                    //    （廃止された hobbyDetail / anime / game / artist / favoriteFood /
+                    //      dislikeFood は削除し、実在するフィールドのみに整理）
                     final List<String> hobbyFields = [
                       'hobby',
-                      'hobbyDetail',
-                      'anime',
-                      'game',
-                      'artist',
-                      'favoriteFood',
-                      'dislikeFood',
+                      'recentInterest',
                     ];
 
                     final List<String> ignoreWords = [
@@ -160,13 +157,17 @@ class _SearchScreenState extends State<SearchScreen> {
 
                       // =======================================================
                       // 🔥【重要】プロフィール未設定ユーザーを検索画面から除外するフィルター
+                      //    💡 廃止された bio の代わりに、必須項目である hobby を
+                      //       プロフィール完成度の判定基準として使用する
                       // =======================================================
                       final String name = (data['name'] ?? '')
                           .toString()
                           .trim();
                       final int age =
                           int.tryParse(data['age']?.toString() ?? '0') ?? 0;
-                      final String bio = (data['bio'] ?? '').toString().trim();
+                      final String hobby = (data['hobby'] ?? '')
+                          .toString()
+                          .trim();
                       final List<dynamic> imageUrls =
                           data['imageUrls'] as List? ?? [];
 
@@ -182,8 +183,8 @@ class _SearchScreenState extends State<SearchScreen> {
                       if (imageUrls.isEmpty) {
                         return false;
                       }
-                      // 4. 自己紹介文が空のままのユーザーは非表示
-                      if (bio.isEmpty) {
+                      // 4. 好きなこと（趣味）が空のままのユーザーは非表示
+                      if (hobby.isEmpty) {
                         return false;
                       }
                       // =======================================================
@@ -200,25 +201,15 @@ class _SearchScreenState extends State<SearchScreen> {
                         return value.toString().toLowerCase().contains(query);
                       }
 
+                      // 💡 検索対象を、実際に存在するフィールドのみに整理
                       final bool matchesKeyword =
                           _searchKeyword.isEmpty ||
                           (doc.id.toLowerCase().contains(query) ||
                               _contains(data['name']) ||
                               _contains(data['location']) ||
-                              _contains(data['bio']) ||
-                              _contains(data['interests']) ||
-                              _contains(data['idealFriend']) ||
-                              _contains(data['school']) ||
-                              _contains(data['work']) ||
-                              _contains(data['qualification']) ||
-                              _contains(data['club']) ||
                               _contains(data['hobby']) ||
-                              _contains(data['pet']) ||
-                              _contains(data['anime']) ||
-                              _contains(data['artist']) ||
-                              _contains(data['youtube']) ||
-                              _contains(data['game']) ||
-                              _contains(data['brand']) ||
+                              _contains(data['recentInterest']) ||
+                              _contains(data['idealFriend']) ||
                               _contains(data['tags']));
 
                       final int userAge =
@@ -416,8 +407,10 @@ class _SearchScreenState extends State<SearchScreen> {
     final String name = data['name'] ?? '名前なし';
     final String age = data['age']?.toString() ?? '--';
     final String gender = data['gender'] ?? '未設定';
-    final String bio = data['bio'] ?? '未設定';
-    final String interests = data['interests'] ?? '未設定';
+    // 💡 「自己紹介」→「好きなこと（趣味）」に変更（hobbyフィールドを表示）
+    final String hobby = data['hobby'] ?? '未設定';
+    // 💡 「ハマっていること」の表示元を、存在しない'interests'から'recentInterest'に修正
+    final String recentInterest = data['recentInterest'] ?? '未設定';
     final String target = data['idealFriend'] ?? '未設定';
     final String? imageUrl = (data['imageUrls'] as List?)?.isNotEmpty == true
         ? data['imageUrls'][0]
@@ -515,9 +508,9 @@ class _SearchScreenState extends State<SearchScreen> {
                     ],
                   ),
                   const SizedBox(height: 20),
-                  _buildSectionTitle("自己紹介"),
+                  _buildSectionTitle("好きなこと（趣味）"),
                   Text(
-                    bio,
+                    hobby,
                     style: const TextStyle(
                       fontSize: 15,
                       color: Colors.black87,
@@ -525,9 +518,9 @@ class _SearchScreenState extends State<SearchScreen> {
                     ),
                   ),
                   const SizedBox(height: 16),
-                  _buildSectionTitle("ハマっていること"),
+                  _buildSectionTitle("最近特にハマってること"),
                   Text(
-                    interests,
+                    recentInterest,
                     style: const TextStyle(
                       fontSize: 15,
                       color: Colors.black87,
@@ -562,7 +555,9 @@ class _SearchScreenState extends State<SearchScreen> {
     final String name = data['name'] ?? '名前なし';
     final String age = data['age']?.toString() ?? '--';
     final String location = data['location'] ?? '未設定';
-    final String interests = data['interests'] ?? '最近ハマってることはまだありません。';
+    // 💡 存在しない'interests'フィールドの代わりに'recentInterest'を表示
+    final String recentInterest =
+        data['recentInterest'] ?? '最近特にハマってることはまだありません。';
     final String? imageUrl = (data['imageUrls'] as List?)?.isNotEmpty == true
         ? data['imageUrls'][0]
         : null;
@@ -718,7 +713,7 @@ class _SearchScreenState extends State<SearchScreen> {
                     const SizedBox(height: 8),
                     Flexible(
                       child: Text(
-                        interests,
+                        recentInterest,
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(fontSize: 13, height: 1.3),

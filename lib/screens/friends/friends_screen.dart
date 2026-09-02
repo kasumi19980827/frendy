@@ -33,7 +33,7 @@ class _FriendsScreenState extends State<FriendsScreen> {
   // 💡 リストごとのユーザー情報キャッシュ（友達一覧／申請一覧／いいね等を個別管理）
   final Map<String, _CachedUserFetch> _fetchCaches = {};
 
-  // 💡 処理中の友達申請IDを保持し、二重承認を防ぐ
+  // 💡 処理中の友達申請IDを保持し、二重承認・二重拒否を防ぐ
   final Set<String> _processingRequestIds = {};
 
   // --- Firestoreからユーザー情報をまとめて取得する（N+1問題対策） ---
@@ -87,6 +87,33 @@ class _FriendsScreenState extends State<FriendsScreen> {
     );
     _fetchCaches[cacheKey] = _CachedUserFetch(idsSignature, future);
     return future;
+  }
+
+  // 💡 「本当にpending状態の申請だけ」を数えるための共通ヘルパー。
+  //    ・重複送信などで同じ相手から複数のpendingリクエストが残っている場合は
+  //      送信者(fromId)単位で重複排除する
+  //    ・Firestoreのクエリ結果をそのまま信用せず、statusフィールドの値を
+  //      クライアント側でも再確認し、意図しない型・表記のデータを弾く
+  List<QueryDocumentSnapshot> _dedupedPendingRequests(
+    List<QueryDocumentSnapshot> docs,
+  ) {
+    final Map<String, QueryDocumentSnapshot> uniqueBySender = {};
+
+    for (final doc in docs) {
+      final data = doc.data() as Map<String, dynamic>?;
+      if (data == null) continue;
+
+      final String status = (data['status'] ?? '').toString();
+      if (status != 'pending') continue; // 💡 念のためクライアント側でも再検証
+
+      final String? fromId = data['fromId'] as String?;
+      if (fromId == null || fromId.isEmpty) continue;
+
+      // 💡 同じ送信者からの重複した申請は最初の1件だけを残す
+      uniqueBySender.putIfAbsent(fromId, () => doc);
+    }
+
+    return uniqueBySender.values.toList();
   }
 
   @override
@@ -160,6 +187,12 @@ class _FriendsScreenState extends State<FriendsScreen> {
 
   // 通知バッジ付きの友達申請メニュー
   Widget _buildRequestMenuItem() {
+    // 💡 myIdが空（未ログイン等）の状態でクエリを投げないようにする。
+    //    空文字列でのisEqualTo検索が、想定外のデータにマッチしてしまうのを防ぐ
+    if (myId.isEmpty) {
+      return _buildMenuItem('友達申請', Icons.person_add);
+    }
+
     return StreamBuilder<QuerySnapshot>(
       stream: FirebaseFirestore.instance
           .collection('friend_requests')
@@ -167,7 +200,18 @@ class _FriendsScreenState extends State<FriendsScreen> {
           .where('status', isEqualTo: 'pending')
           .snapshots(),
       builder: (context, snapshot) {
-        int requestCount = snapshot.hasData ? snapshot.data!.docs.length : 0;
+        // 💡 エラー時は通知が出しっぱなしにならないよう、必ず0件扱いにする
+        if (snapshot.hasError) {
+          debugPrint('友達申請の取得エラー: ${snapshot.error}');
+          return _buildMenuItem('友達申請', Icons.person_add);
+        }
+
+        // 💡 クエリ結果をそのまま件数として使わず、
+        //    重複送信や不正な形式のデータを除いた「実際に有効な申請数」を数える
+        final int requestCount = snapshot.hasData
+            ? _dedupedPendingRequests(snapshot.data!.docs).length
+            : 0;
+
         return Stack(
           children: [
             _buildMenuItem('友達申請', Icons.person_add),
@@ -351,10 +395,18 @@ class _FriendsScreenState extends State<FriendsScreen> {
           .where('status', isEqualTo: 'pending')
           .snapshots(),
       builder: (context, snapshot) {
+        if (snapshot.hasError) {
+          debugPrint('友達申請一覧の取得エラー: ${snapshot.error}');
+          return const Center(
+            child: Text('エラーが発生しました', style: TextStyle(color: Colors.grey)),
+          );
+        }
         if (!snapshot.hasData) {
           return const Center(child: CircularProgressIndicator());
         }
-        final docs = snapshot.data!.docs;
+
+        // 💡 通知バッジと同じロジックで重複排除・再検証し、表示件数を一致させる
+        final docs = _dedupedPendingRequests(snapshot.data!.docs);
         if (docs.isEmpty) {
           return const Center(
             child: Text('届いている申請はありません', style: TextStyle(color: Colors.grey)),
@@ -401,44 +453,74 @@ class _FriendsScreenState extends State<FriendsScreen> {
                         : null,
                   ),
                   title: Text(name),
-                  trailing: SizedBox(
-                    width: 64,
-                    height: 30,
-                    child: ElevatedButton(
-                      onPressed: isProcessing
-                          ? null
-                          : () => _acceptFriendRequest(fromId, name, requestId),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: AppColors.bg,
-                        disabledBackgroundColor: Colors.grey[300],
-                        elevation: 0,
-                        minimumSize: const Size(64, 30),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 0,
-                        ),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(20),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // 💡 拒否ボタン：ユーザーが自分で申請を消せる手段がなかったため追加。
+                      //    これがないと、承認したくない申請がいつまでも通知に残り続けてしまう
+                      IconButton(
+                        icon: isProcessing
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(
+                                Icons.close,
+                                color: Colors.grey,
+                                size: 20,
+                              ),
+                        onPressed: isProcessing
+                            ? null
+                            : () => _declineFriendRequest(name, requestId),
+                        tooltip: '拒否する',
+                      ),
+                      SizedBox(
+                        width: 64,
+                        height: 30,
+                        child: ElevatedButton(
+                          onPressed: isProcessing
+                              ? null
+                              : () => _acceptFriendRequest(
+                                  fromId,
+                                  name,
+                                  requestId,
+                                ),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: AppColors.bg,
+                            disabledBackgroundColor: Colors.grey[300],
+                            elevation: 0,
+                            minimumSize: const Size(64, 30),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 0,
+                            ),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(20),
+                            ),
+                          ),
+                          child: isProcessing
+                              ? const SizedBox(
+                                  width: 14,
+                                  height: 14,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.white,
+                                  ),
+                                )
+                              : const Text(
+                                  '承認',
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
                         ),
                       ),
-                      child: isProcessing
-                          ? const SizedBox(
-                              width: 14,
-                              height: 14,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: Colors.white,
-                              ),
-                            )
-                          : const Text(
-                              '承認',
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 12,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                    ),
+                    ],
                   ),
                 );
               },
@@ -1035,6 +1117,39 @@ class _FriendsScreenState extends State<FriendsScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('申請の承認に失敗しました。もう一度お試しください。')),
         );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _processingRequestIds.remove(requestId));
+      }
+    }
+  }
+
+  // 💡 友達申請の拒否：ドキュメントを完全に削除し、通知バッジからも確実に消す。
+  //    （statusを'rejected'に変えるだけだと、クエリの条件次第で
+  //      カウントに残り続けるリスクがあるため、削除の方が確実）
+  Future<void> _declineFriendRequest(String name, String requestId) async {
+    if (_processingRequestIds.contains(requestId)) return;
+    setState(() => _processingRequestIds.add(requestId));
+
+    try {
+      await FirebaseFirestore.instance
+          .collection('friend_requests')
+          .doc(requestId)
+          .delete()
+          .timeout(_networkTimeout);
+
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('$name さんからの申請を削除しました')));
+      }
+    } catch (e) {
+      debugPrint('友達申請拒否エラー: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('操作に失敗しました。もう一度お試しください。')));
       }
     } finally {
       if (mounted) {
