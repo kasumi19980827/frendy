@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -31,6 +32,14 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
   int _monthlyNewTalkCount = 0; // 今月すでに使った新規トーク開始枠の数
   bool _hasChatHistoryWithThisPeer = false;
   bool _isLoadingLimits = true;
+
+  // 💡 いいね機能用の状態
+  //    カウント・いいね済みかどうかは、ローカルの一時変数ではなく
+  //    Firestoreのストリームを直接購読する方式にすることで、
+  //    画面を行き来しても常に最新・正しい値が表示されるようにする
+  bool _isTogglingLike = false; // 連打防止用ガード
+
+  static const Duration _networkTimeout = Duration(seconds: 20);
 
   @override
   void initState() {
@@ -74,7 +83,8 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
       final myDoc = await FirebaseFirestore.instance
           .collection('users')
           .doc(myId)
-          .get();
+          .get()
+          .timeout(_networkTimeout);
       if (myDoc.exists) {
         final myData = myDoc.data() ?? {};
         _myPlan = myData['plan'] ?? 'free';
@@ -93,7 +103,8 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
       final roomDoc = await FirebaseFirestore.instance
           .collection('chat_rooms')
           .doc(chatRoomId)
-          .get();
+          .get()
+          .timeout(_networkTimeout);
       if (roomDoc.exists) {
         final roomData = roomDoc.data();
         final String lastMessage = roomData?['lastMessage'] ?? '';
@@ -262,6 +273,172 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
           peerImageUrl: imageUrl,
         ),
       ),
+    );
+  }
+
+  // ==========================================
+  // 💡 いいね機能
+  // ==========================================
+
+  Future<void> _toggleLike(bool currentlyLiked) async {
+    final String myId = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final String peerId = widget.userId;
+    final bool isMyProfile = peerId == myId;
+
+    // 💡 未ログイン・自分自身のプロフィール・連打中は何もしない
+    if (myId.isEmpty || isMyProfile || _isTogglingLike) return;
+
+    final bool nextLiked = !currentlyLiked;
+    setState(() => _isTogglingLike = true);
+
+    final myDocRef = FirebaseFirestore.instance.collection('users').doc(myId);
+    final peerDocRef = FirebaseFirestore.instance
+        .collection('users')
+        .doc(peerId);
+
+    try {
+      // 💡 単純なincrement()だけに頼らず、トランザクションで現在値を読み取ってから
+      //    書き込む方式に変更。likeCountが何らかの理由で数値以外（文字列など）に
+      //    なってしまっているユーザーがいても、ここで数値に補正して書き込むため、
+      //    「特定の人だけカウントされない」問題を自動的に修復できる
+      await FirebaseFirestore.instance
+          .runTransaction((transaction) async {
+            final peerSnap = await transaction.get(peerDocRef);
+
+            if (!peerSnap.exists) {
+              throw Exception('相手のプロフィールが見つかりませんでした');
+            }
+
+            final peerData = peerSnap.data() as Map<String, dynamic>? ?? {};
+            final dynamic rawCount = peerData['likeCount'];
+
+            // 💡 数値・数値文字列・null・不正値のいずれであっても、
+            //    ここで安全な非負整数に正規化する
+            int currentCount;
+            if (rawCount is num) {
+              currentCount = rawCount.toInt();
+            } else if (rawCount is String) {
+              currentCount = int.tryParse(rawCount) ?? 0;
+            } else {
+              currentCount = 0;
+            }
+            if (currentCount < 0) currentCount = 0;
+
+            final int newCount = (currentCount + (nextLiked ? 1 : -1)).clamp(
+              0,
+              1 << 31,
+            );
+
+            final List<dynamic> likedBy = List<dynamic>.from(
+              peerData['likedBy'] ?? [],
+            );
+            if (nextLiked) {
+              if (!likedBy.contains(myId)) likedBy.add(myId);
+            } else {
+              likedBy.remove(myId);
+            }
+
+            transaction.set(peerDocRef, {
+              'likedBy': likedBy,
+              'likeCount': newCount, // 💡 常に正規化された数値として書き込む
+            }, SetOptions(merge: true));
+
+            if (nextLiked) {
+              transaction.set(myDocRef, {
+                'likes': FieldValue.arrayUnion([peerId]),
+              }, SetOptions(merge: true));
+            } else {
+              transaction.set(myDocRef, {
+                'likes': FieldValue.arrayRemove([peerId]),
+              }, SetOptions(merge: true));
+            }
+          })
+          .timeout(_networkTimeout);
+      // 💡 ローカル状態は持たないため、書き込み成功後はストリームが
+      //    自動的に最新の状態を反映してくれる（明示的な巻き戻し処理は不要）
+    } on FirebaseException catch (e) {
+      // 💡 原因を特定できるよう、Firestoreのエラーコードを明示的にログ＆表示する
+      debugPrint('いいね処理エラー(Firestore): code=${e.code} message=${e.message}');
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('いいねの処理に失敗しました（${e.code}）')));
+      }
+    } catch (e) {
+      debugPrint('いいね処理エラー(その他): $e');
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('いいねの処理に失敗しました（$e）')));
+      }
+    } finally {
+      if (mounted) setState(() => _isTogglingLike = false);
+    }
+  }
+
+  // 💡 いいねボタン＋カウント表示。
+  //    peer側の likeCount と 自分側の likes 配列、双方をリアルタイム購読することで、
+  //    このウィジェットが再生成されても（＝別画面から戻ってきても）
+  //    常にFirestore上の最新・正しい値を表示する
+  Widget _buildLikeSection() {
+    final String myId = FirebaseAuth.instance.currentUser?.uid ?? '';
+
+    // 💡 未ログイン状態ではいいねボタン自体を表示しない
+    if (myId.isEmpty) return const SizedBox.shrink();
+
+    return StreamBuilder<DocumentSnapshot>(
+      stream: FirebaseFirestore.instance
+          .collection('users')
+          .doc(widget.userId)
+          .snapshots(),
+      builder: (context, peerSnap) {
+        final peerData = peerSnap.data?.data() as Map<String, dynamic>?;
+        int liveCount =
+            ((peerData?['likeCount'] as num?) ??
+                    (widget.userData['likeCount'] as num?) ??
+                    0)
+                .toInt();
+        if (liveCount < 0) liveCount = 0;
+
+        return StreamBuilder<DocumentSnapshot>(
+          // 💡 myIdは上でチェック済みのため、ここでは常に有効なストリームを渡せる
+          //    （Stream.empty()はconstコンストラクタではないため使用しない）
+          stream: FirebaseFirestore.instance
+              .collection('users')
+              .doc(myId)
+              .snapshots(),
+          builder: (context, mySnap) {
+            final myData = mySnap.data?.data() as Map<String, dynamic>?;
+            final List<dynamic> myLikes = myData?['likes'] ?? [];
+            final bool isLiked = myLikes.contains(widget.userId);
+
+            return Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const SizedBox(width: 10),
+                GestureDetector(
+                  onTap: _isTogglingLike ? null : () => _toggleLike(isLiked),
+                  child: Icon(
+                    // 💡 「グッドボタン」（サムズアップ）アイコンに変更
+                    isLiked ? Icons.thumb_up_alt : Icons.thumb_up_alt_outlined,
+                    color: const Color(0xFFFF8A80),
+                    size: 24,
+                  ),
+                ),
+                const SizedBox(width: 4),
+                Text(
+                  '$liveCount',
+                  style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.black54,
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+      },
     );
   }
 
@@ -460,10 +637,11 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
                         ),
                         const SizedBox(height: 8),
                         Row(
+                          crossAxisAlignment: CrossAxisAlignment.center,
                           children: [
                             Flexible(
                               child: Text(
-                                '${data['name'] ?? ''}${_hasValue(data['age']) ? ' (${data['age']})' : ''}',
+                                data['name'] ?? '',
                                 style: const TextStyle(
                                   fontSize: 26,
                                   fontWeight: FontWeight.bold,
@@ -472,6 +650,23 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
                                 overflow: TextOverflow.ellipsis,
                               ),
                             ),
+                            if (_hasValue(data['age'])) ...[
+                              const SizedBox(width: 4),
+                              Text(
+                                '(${data['age']})',
+                                style: const TextStyle(
+                                  fontSize: 22,
+                                  fontWeight: FontWeight.bold,
+                                  height: 1.0,
+                                  color: Colors.black87,
+                                ),
+                              ),
+                            ],
+
+                            // 💡 いいねボタン：年齢の右隣に配置。
+                            //    自分自身のプロフィールでは押しても意味がないため非表示にする
+                            if (!isMyProfile) _buildLikeSection(),
+
                             if (_hasValue(data['gender'])) ...[
                               const SizedBox(width: 8),
                               Builder(
@@ -718,9 +913,11 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
       final peerDoc = FirebaseFirestore.instance
           .collection('users')
           .doc(peerId);
-      await peerDoc.update({
-        'footprints': FieldValue.arrayUnion([myId]),
-      });
+      await peerDoc
+          .update({
+            'footprints': FieldValue.arrayUnion([myId]),
+          })
+          .timeout(_networkTimeout);
     } catch (e) {
       debugPrint('足跡の記録に失敗しました: $e');
     }
