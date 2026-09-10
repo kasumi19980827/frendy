@@ -11,10 +11,15 @@ import 'package:matching_app/screens/profile/profile_setup_screen.dart';
 import 'package:matching_app/screens/settings/help_support_screen.dart';
 import 'package:matching_app/screens/subscription/subscription_screen.dart';
 import 'package:matching_app/screens/settings/app_settings_screen.dart';
-import 'package:matching_app/screens/settings/help_support_screen.dart';
 
 class MypageScreen extends StatelessWidget {
   const MypageScreen({super.key});
+
+  // 💡 身分証画像などを格納するStorageバケット。
+  //    他画面（profile_setup_screen.dart等）と共通の値。
+  //    将来的には constants/app_config.dart 等に一元化することを推奨
+  static const String _storageBucket =
+      'gs://frendy-app-project.firebasestorage.app';
 
   @override
   Widget build(BuildContext context) {
@@ -33,8 +38,16 @@ class MypageScreen extends StatelessWidget {
         actions: [
           IconButton(
             icon: const Icon(Icons.account_circle, color: Colors.black87),
+            tooltip: 'プロフィールを編集',
+            // 💡 以前は何も起きないボタンだったため、
+            //    プロフィール編集画面への導線として機能させる
             onPressed: () {
-              debugPrint('アイコンがタップされました');
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => const ProfileSetupScreen(),
+                ),
+              );
             },
           ),
         ],
@@ -260,6 +273,90 @@ class MypageScreen extends StatelessWidget {
     );
   }
 
+  // --- 🛠️ Storage内の指定フォルダを丸ごと削除するヘルパー（並列化） ---
+  Future<void> _deleteStorageFolder(String path) async {
+    try {
+      final storageRef = FirebaseStorage.instanceFor(
+        bucket: _storageBucket,
+      ).ref().child(path);
+
+      final listResult = await storageRef.listAll();
+      // 💡 逐次削除ではなく並列削除にすることで、退会処理全体の待ち時間を短縮する
+      await Future.wait(listResult.items.map((item) => item.delete()));
+    } catch (e) {
+      // 対象フォルダが存在しない（＝画像未登録）場合などはここに来るため無視して続行
+      debugPrint("Storage削除スキップ ($path): $e");
+    }
+  }
+
+  // --- 🛠️ 他ユーザーのドキュメントに残る自分への参照をクリーンアップ ---
+  //    退会後も「友達一覧」「いいねした一覧」等に、存在しないはずのUIDが
+  //    残り続けてしまうのを防ぐためのベストエフォート処理。
+  //    一部が失敗しても、退会処理自体は継続する
+  Future<void> _cleanupUserReferences(String uid) async {
+    final firestore = FirebaseFirestore.instance;
+
+    // 💡 自分のUIDが配列として含まれている可能性のあるフィールド一覧
+    const List<String> arrayFields = [
+      'friends',
+      'likes',
+      'likedBy',
+      'blocks',
+      'blockedBy',
+      'footprints',
+    ];
+
+    for (final field in arrayFields) {
+      try {
+        final snapshot = await firestore
+            .collection('users')
+            .where(field, arrayContains: uid)
+            .get();
+
+        // 💡 Firestoreのバッチ上限（500件）を考慮し、100件ごとに分けて処理する
+        const int chunkSize = 100;
+        for (int i = 0; i < snapshot.docs.length; i += chunkSize) {
+          final chunk = snapshot.docs.sublist(
+            i,
+            (i + chunkSize > snapshot.docs.length)
+                ? snapshot.docs.length
+                : i + chunkSize,
+          );
+          final batch = firestore.batch();
+          for (final doc in chunk) {
+            batch.update(doc.reference, {
+              field: FieldValue.arrayRemove([uid]),
+            });
+          }
+          await batch.commit();
+        }
+      } catch (e) {
+        debugPrint('関連データ削除エラー（$field）: $e');
+        // 💡 1つのフィールドで失敗しても他のクリーンアップは続行する
+      }
+    }
+
+    // 💡 自分が送信・受信した友達申請も削除する
+    try {
+      final fromRequests = await firestore
+          .collection('friend_requests')
+          .where('fromId', isEqualTo: uid)
+          .get();
+      final toRequests = await firestore
+          .collection('friend_requests')
+          .where('toId', isEqualTo: uid)
+          .get();
+
+      final batch = firestore.batch();
+      for (final doc in [...fromRequests.docs, ...toRequests.docs]) {
+        batch.delete(doc.reference);
+      }
+      await batch.commit();
+    } catch (e) {
+      debugPrint('友達申請の削除エラー: $e');
+    }
+  }
+
   // --- 🛠️ 統合版：退会・プロフィール＆画像完全削除処理 ---
   Future<void> _deleteAccount(BuildContext context) async {
     final user = FirebaseAuth.instance.currentUser;
@@ -276,25 +373,23 @@ class MypageScreen extends StatelessWidget {
     );
 
     try {
-      // 1. Firebase Storage の画像データをすべて削除
-      try {
-        final storageRef = FirebaseStorage.instanceFor(
-          bucket: 'gs://frendy-app-project.firebasestorage.app',
-        ).ref().child('user_images/$uid');
+      // 1. Firebase Storage のデータを削除
+      //    💡 プロフィール画像だけでなく、身分証明書の画像（user_verifications）も
+      //       必ず削除する。ここを削除しないと、退会後も本人確認書類が
+      //       Storageに残り続けてしまい、重大なプライバシー問題になる
+      await Future.wait([
+        _deleteStorageFolder('user_images/$uid'),
+        _deleteStorageFolder('user_verifications/$uid'),
+      ]);
 
-        final listResult = await storageRef.listAll();
-        for (var item in listResult.items) {
-          await item.delete();
-        }
-      } catch (storageError) {
-        // 画像がない等のエラーは無視して次に進む
-        debugPrint("Storage画像削除スキップ (画像未登録の可能性): $storageError");
-      }
+      // 2. 他ユーザーのドキュメントに残る自分への参照をクリーンアップ
+      //    （友達一覧・いいね・ブロック・足跡・友達申請から自分の痕跡を消す）
+      await _cleanupUserReferences(uid);
 
-      // 2. Firestore のユーザープロフィールドキュメントを削除
+      // 3. Firestore のユーザープロフィールドキュメントを削除
       await FirebaseFirestore.instance.collection('users').doc(uid).delete();
 
-      // 3. Firebase Auth のアカウント自体を削除
+      // 4. Firebase Auth のアカウント自体を削除
       try {
         await user.delete();
       } on FirebaseAuthException catch (authError) {
@@ -323,7 +418,7 @@ class MypageScreen extends StatelessWidget {
         rethrow;
       }
 
-      // 4. 各種サインアウト処理の実行
+      // 5. 各種サインアウト処理の実行
       await FirebaseAuth.instance.signOut();
       final GoogleSignIn googleSignIn = GoogleSignIn();
       if (await googleSignIn.isSignedIn()) {
@@ -333,7 +428,7 @@ class MypageScreen extends StatelessWidget {
       // ローディングを閉じる
       if (context.mounted) Navigator.pop(context);
 
-      // 5. ログイン画面へ完全リセット
+      // 6. ログイン画面へ完全リセット
       if (context.mounted) {
         Navigator.of(context, rootNavigator: true).pushAndRemoveUntil(
           MaterialPageRoute(builder: (context) => const LoginScreen()),
@@ -345,6 +440,7 @@ class MypageScreen extends StatelessWidget {
         );
       }
     } catch (e) {
+      debugPrint('退会処理エラー: $e');
       if (context.mounted) Navigator.pop(context); // ローディングを閉じる
 
       // 予期せぬエラー時のセーフティネット
@@ -357,8 +453,9 @@ class MypageScreen extends StatelessWidget {
           (route) => false,
         );
         scaffoldMessengerKey.currentState?.hideCurrentSnackBar();
+        // 💡 内部エラーの詳細($e)はユーザーへ見せず、ログにのみ残す
         scaffoldMessengerKey.currentState?.showSnackBar(
-          SnackBar(content: Text('エラーが発生したためトップに戻りました: $e')),
+          const SnackBar(content: Text('エラーが発生したためトップに戻りました。もう一度お試しください。')),
         );
       }
     }
@@ -395,7 +492,7 @@ class MypageScreen extends StatelessWidget {
           style: TextStyle(fontWeight: FontWeight.bold),
         ),
         content: const Text(
-          '本当に退会しますか？\nアカウントを削除すると、プロフィールを含むすべてのデータが完全に消去され、復旧できません。',
+          '本当に退会しますか？\nプロフィール・提出済みの本人確認書類を含むすべてのデータが完全に消去され、復旧できません。',
         ),
         actions: [
           TextButton(
