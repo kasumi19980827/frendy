@@ -9,7 +9,6 @@ import 'package:matching_app/screens/friends/friends_screen.dart';
 import 'package:matching_app/screens/home/home_screen.dart';
 import 'package:matching_app/screens/talk/message_screen.dart';
 import 'package:matching_app/screens/mypage/mypage_screen.dart';
-import 'package:matching_app/screens/plaza/plaza_screen.dart';
 import 'package:matching_app/screens/search/search_screen.dart';
 import 'package:matching_app/screens/auth/login_screen.dart'; // 2. 追加
 import 'package:matching_app/constants/app_colors.dart';
@@ -99,9 +98,9 @@ class _MyHomePageState extends State<MyHomePage> {
   @override
   void initState() {
     super.initState();
+    // 💡 広場機能を削除したため、PlazaScreenをリストから除外
     _pages = [
       const HomeScreen(),
-      const PlazaScreen(),
       const SearchScreen(),
       const MessageScreen(),
       const FriendsScreen(),
@@ -120,8 +119,8 @@ class _MyHomePageState extends State<MyHomePage> {
         selectedItemColor: AppColors.point,
         unselectedItemColor: AppColors.txt,
         items: const [
+          // 💡 「広場」タブを削除
           BottomNavigationBarItem(icon: Icon(Icons.home), label: 'ホーム'),
-          BottomNavigationBarItem(icon: Icon(Icons.groups), label: '広場'),
           BottomNavigationBarItem(icon: Icon(Icons.search), label: '探す'),
           BottomNavigationBarItem(icon: Icon(Icons.forum), label: 'トーク'),
           BottomNavigationBarItem(icon: Icon(Icons.people), label: '友達'),
