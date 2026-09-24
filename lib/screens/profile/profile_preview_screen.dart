@@ -53,7 +53,7 @@ class _ProfilePreviewScreenState extends State<ProfilePreviewScreen> {
     );
 
     // --- セクションごとの表示判定用リスト作成 ---
-    // 💡 学校・職業欄は編集画面から削除されたため、性別・居住地のみに整理
+    // 💡 学校・職業欄を復活（任意項目として編集画面に再追加されたため）
     final List<Widget> basicInfoTiles = [];
     if (_hasValue(widget.data['gender'])) {
       basicInfoTiles.add(
@@ -63,6 +63,16 @@ class _ProfilePreviewScreenState extends State<ProfilePreviewScreen> {
     if (_hasValue(widget.data['location'])) {
       basicInfoTiles.add(
         _buildDetailTile(Icons.location_on, '居住地', widget.data['location']),
+      );
+    }
+    if (_hasValue(widget.data['school'])) {
+      basicInfoTiles.add(
+        _buildDetailTile(Icons.school, '学校', widget.data['school']),
+      );
+    }
+    if (_hasValue(widget.data['work'])) {
+      basicInfoTiles.add(
+        _buildDetailTile(Icons.work, '職業', widget.data['work']),
       );
     }
 
@@ -197,7 +207,7 @@ class _ProfilePreviewScreenState extends State<ProfilePreviewScreen> {
                           crossAxisAlignment: CrossAxisAlignment.center,
                           children: [
                             Text(
-                              '${widget.data['name'] ?? '名前'}${_hasValue(widget.data['age']) ? ' (${widget.data['age']})' : ''}',
+                              '${widget.data['name'] ?? 'ニックネーム'}${_hasValue(widget.data['age']) ? ' (${widget.data['age']})' : ''}',
                               style: const TextStyle(
                                 fontSize: 26,
                                 fontWeight: FontWeight.bold,
@@ -270,7 +280,7 @@ class _ProfilePreviewScreenState extends State<ProfilePreviewScreen> {
 
                   // 💡 「好きなこと（趣味）」に名称変更（旧: 趣味・好きなこと）
                   if (_hasValue(widget.data['hobby'])) ...[
-                    _buildSectionTitle('好きなこと（趣味）'),
+                    _buildSectionTitle('好きなこと・趣味'),
                     _buildContent(widget.data['hobby']),
                   ],
 
@@ -281,8 +291,20 @@ class _ProfilePreviewScreenState extends State<ProfilePreviewScreen> {
                   ],
 
                   if (_hasValue(widget.data['idealFriend'])) ...[
-                    _buildSectionTitle('どんな友達が欲しい？'),
+                    _buildSectionTitle('どんな友達を作りたい？'),
                     _buildContent(widget.data['idealFriend']),
+                  ],
+
+                  // 💡 「休日の過ごし方」欄を新規追加（任意）
+                  if (_hasValue(widget.data['holidayActivity'])) ...[
+                    _buildSectionTitle('休日の過ごし方'),
+                    _buildContent(widget.data['holidayActivity']),
+                  ],
+
+                  // 💡 「NGなこと・苦手なこと」欄を新規追加（任意）
+                  if (_hasValue(widget.data['ngThings'])) ...[
+                    _buildSectionTitle('NGなこと・苦手なこと'),
+                    _buildContent(widget.data['ngThings']),
                   ],
 
                   // 基本情報（性別・居住地のみ）

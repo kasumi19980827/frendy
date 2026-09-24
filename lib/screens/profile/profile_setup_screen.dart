@@ -25,7 +25,11 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
   final _locationController = TextEditingController();
   final _hobbyController = TextEditingController(); // 好きなこと（趣味） (必須)
   final _recentInterestController = TextEditingController(); // 最近特にハマってること (必須)
-  final _idealFriendController = TextEditingController(); // どんな友達が欲しい（必須）
+  final _idealFriendController = TextEditingController(); // どんな友達を作りたい（必須）
+  final _holidayController = TextEditingController(); // 休日の過ごし方（任意）
+  final _schoolController = TextEditingController(); // 学校（任意）
+  final _workController = TextEditingController(); // 職業（任意）
+  final _ngController = TextEditingController(); // NGなこと・苦手なこと（任意）
 
   List<String> _selectedTags = [];
 
@@ -100,9 +104,14 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
           _hobbyController.text = data['hobby'] ?? '';
           _recentInterestController.text = data['recentInterest'] ?? '';
           _idealFriendController.text = data['idealFriend'] ?? '';
+          _holidayController.text = data['holidayActivity'] ?? '';
+          _schoolController.text = data['school'] ?? '';
+          _workController.text = data['work'] ?? '';
+          _ngController.text = data['ngThings'] ?? '';
 
           if (data['tags'] != null) {
-            _selectedTags = List<String>.from(data['tags']);
+            // 💡 過去データに重複が紛れ込んでいた場合に備え、読み込み時点で重複を除去する
+            _selectedTags = List<String>.from(data['tags']).toSet().toList();
           }
 
           _selectedGender = data['gender'] ?? '男性';
@@ -186,7 +195,9 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
 
   // --- バリデーション ---
   bool _validateInputs() {
-    if (_nameController.text.trim().isEmpty) return _showError('名前を入力してください');
+    if (_nameController.text.trim().isEmpty) {
+      return _showError('ニックネームを入力してください');
+    }
 
     final String ageText = _ageController.text.trim();
     if (ageText.isEmpty) return _showError('年齢を入力してください');
@@ -201,7 +212,7 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
     }
 
     if (_hobbyController.text.trim().isEmpty) {
-      return _showError('好きなこと（趣味）を入力してください');
+      return _showError('好きなこと・趣味を入力してください');
     }
 
     if (_recentInterestController.text.trim().isEmpty) {
@@ -214,7 +225,7 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
     }
 
     if (_idealFriendController.text.trim().isEmpty) {
-      return _showError('どんな友達が欲しいか教えてください');
+      return _showError('どんな友達を作りたいか教えてください');
     }
 
     return true;
@@ -335,6 +346,10 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
             'imageUrls': finalUrls,
             'updatedAt': Timestamp.now(),
             'idealFriend': _idealFriendController.text.trim(),
+            'holidayActivity': _holidayController.text.trim(),
+            'school': _schoolController.text.trim(),
+            'work': _workController.text.trim(),
+            'ngThings': _ngController.text.trim(),
           }, SetOptions(merge: true))
           .timeout(_networkTimeout);
 
@@ -403,6 +418,10 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
                   'gender': _selectedGender,
                   'values': _myValues,
                   'idealFriend': _idealFriendController.text,
+                  'holidayActivity': _holidayController.text,
+                  'school': _schoolController.text,
+                  'work': _workController.text,
+                  'ngThings': _ngController.text,
                 };
                 Navigator.push(
                   context,
@@ -448,14 +467,14 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
                   _buildSectionTitle('プロフィール写真（最大10枚）*'),
                   _buildImageSection(),
 
-                  _buildSectionTitle('タグ（5個まで選択可）'),
+                  _buildSectionTitle('タグ（いくつでも選択可）'),
                   _buildTagSection(),
 
                   _buildSectionTitle('基本情報（必須）'),
                   _buildGenderRadioSection(),
                   _buildTextField(
                     _nameController,
-                    '名前 *',
+                    'ニックネーム *',
                     Icons.person,
                     maxLength: 30,
                   ),
@@ -467,12 +486,24 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
                     maxLength: 3,
                   ),
                   _buildLocationControllerField(),
+                  _buildTextField(
+                    _schoolController,
+                    '学校（任意）',
+                    Icons.school,
+                    maxLength: 50,
+                  ),
+                  _buildTextField(
+                    _workController,
+                    '職業（任意）',
+                    Icons.work,
+                    maxLength: 50,
+                  ),
 
                   // 💡 「趣味・好きなもの」→「好きなこと（趣味）」に変更、入力欄を複数行に拡大
-                  _buildSectionTitle('好きなこと（趣味）（必須）*'),
+                  _buildSectionTitle('好きなこと・趣味（必須）*'),
                   _buildMultiLineField(
                     _hobbyController,
-                    '好きなこと（趣味）を教えてください',
+                    '好きなこと・趣味を教えてください',
                     maxLength: 100,
                   ),
                   // 💡 「趣味について詳しく」欄を削除し、代わりに「最近特にハマってること」を追加（必須）
@@ -482,11 +513,27 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
                     '自由に入力してください（詳しく書くと会話が弾みやすくなります！）',
                     maxLength: 500,
                   ),
-                  // 💡 「どんな友達が欲しい？」を必須に変更
-                  _buildSectionTitle('どんな友達が欲しい？（必須）*'),
+                  // 💡 「どんな友達が欲しい？」→「どんな友達を作りたい？」に変更
+                  _buildSectionTitle('どんな友達を作りたい？（必須）*'),
                   _buildMultiLineField(
                     _idealFriendController,
                     '例：一緒にカフェ巡りできる人、趣味のゲームを語れる人など',
+                    maxLength: 300,
+                  ),
+
+                  // 💡 「休日の過ごし方」欄を新規追加（任意）
+                  _buildSectionTitle('休日の過ごし方（任意）'),
+                  _buildMultiLineField(
+                    _holidayController,
+                    '例：家でゆっくり映画を見る、友達とドライブに行くなど',
+                    maxLength: 300,
+                  ),
+
+                  // 💡 「NGなこと・苦手なこと」欄を新規追加（任意）
+                  _buildSectionTitle('NGなこと・苦手なこと（任意）'),
+                  _buildMultiLineField(
+                    _ngController,
+                    '例：タバコを吸う人はNG、体育会系のノリが苦手、など',
                     maxLength: 300,
                   ),
                   const SizedBox(height: 40),
@@ -575,8 +622,12 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
           selected: isSelected,
           onSelected: (val) {
             setState(() {
+              // 💡 選択数の上限を撤廃。何個でも選択できるようにする
+              //    ただし、同じタグが誤って二重に追加されないようガードする
               if (val) {
-                if (_selectedTags.length < 5) _selectedTags.add(tag);
+                if (!_selectedTags.contains(tag)) {
+                  _selectedTags.add(tag);
+                }
               } else {
                 _selectedTags.remove(tag);
               }
@@ -767,12 +818,15 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
                         ),
                       ),
                       showCheckmark: false,
-                      onSelected: (bool selected) {
+                      // 💡 ChoiceChipが渡すselected引数には頼らず、
+                      //    「既に選択済みの項目を再タップしたら必ず解除する」という
+                      //    ロジックを明示的に実装する（選択解除ができない不具合の対策）
+                      onSelected: (_) {
                         setState(() {
-                          if (selected) {
-                            _myValues[question] = option;
-                          } else {
+                          if (currentSelection == option) {
                             _myValues.remove(question);
+                          } else {
+                            _myValues[question] = option;
                           }
                         });
                       },
@@ -795,6 +849,10 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
     _hobbyController.dispose();
     _recentInterestController.dispose();
     _idealFriendController.dispose();
+    _holidayController.dispose();
+    _schoolController.dispose();
+    _workController.dispose();
+    _ngController.dispose();
     super.dispose();
   }
 }

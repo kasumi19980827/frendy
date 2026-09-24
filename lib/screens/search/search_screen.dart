@@ -112,15 +112,46 @@ class _SearchScreenState extends State<SearchScreen> {
                       '特になしです',
                     ];
 
-                    // 文字列をキーワード単位に分割するための区切り文字（読点、スペース、中黒、スラッシュなど）
+                    // 💡 キーワード同士を区切る文字は「、」（全角・半角の読点）のみとする。
+                    //    これにより、「、」で区切られたフレーズ全体
+                    //   （スペースや「・」を含んでいても）が1つのキーワードとして扱われる
+                    const String _wordSeparatorPattern = r'[、,，]+';
+
+                    // 💡 各キーワードの前後だけに残ってしまう記号を取り除くための
+                    //    トリム用パターン（内部の空白や記号は保持する）
+                    const String _edgeSymbolPattern =
+                        r'[。．/・\s　!！?？()（）「」『』【】:：;；\-－~〜…]+';
+
+                    // 文字列を「、」でキーワード単位に分割する
+                    //    （読点区切りのフレーズを、それ以上細かく分割しない）
                     List<String> _splitToKeywords(String text) {
                       return text
-                          .split(RegExp(r'[、,。/・\s　]+')) // 全角半角の区切り文字をまとめて分割
-                          .map((s) => s.trim().toLowerCase())
+                          .split(RegExp(_wordSeparatorPattern))
+                          .map(
+                            (s) => s
+                                .replaceAll(
+                                  RegExp(
+                                    '^$_edgeSymbolPattern|$_edgeSymbolPattern\$',
+                                  ),
+                                  '',
+                                )
+                                .trim()
+                                .toLowerCase(),
+                          )
                           .where(
                             (s) => s.length >= 2 && !ignoreWords.contains(s),
                           ) // 1文字語は誤マッチしやすいので除外
                           .toList();
+                    }
+
+                    // 💡 検索バーに入力された文字列も、前後にくっついた句読点・記号を
+                    //    取り除いてから照合に使う（「カフェ巡り、」のような入力でも
+                    //    正しく一致判定できるようにするため）
+                    String _sanitizeSearchQuery(String text) {
+                      return text.trim().toLowerCase().replaceAll(
+                        RegExp('^$_edgeSymbolPattern|$_edgeSymbolPattern\$'),
+                        '',
+                      );
                     }
 
                     // --- 自分の全趣味・嗜好フィールドから有効な単語を抽出してリスト化 ---
@@ -189,7 +220,7 @@ class _SearchScreenState extends State<SearchScreen> {
                       }
                       // =======================================================
 
-                      final query = _searchKeyword.toLowerCase();
+                      final query = _sanitizeSearchQuery(_searchKeyword);
                       bool _contains(dynamic value) {
                         if (value == null) return false;
                         if (value is List) {
@@ -202,8 +233,10 @@ class _SearchScreenState extends State<SearchScreen> {
                       }
 
                       // 💡 検索対象を、実際に存在するフィールドのみに整理
+                      // 💡 サニタイズ後のqueryが空かどうかで判定する
+                      //    （記号だけの入力を「検索している」扱いにしないため）
                       final bool matchesKeyword =
-                          _searchKeyword.isEmpty ||
+                          query.isEmpty ||
                           (doc.id.toLowerCase().contains(query) ||
                               _contains(data['name']) ||
                               _contains(data['location']) ||
@@ -264,17 +297,24 @@ class _SearchScreenState extends State<SearchScreen> {
                       return plan == 'premium' ? 1 : 0;
                     }
 
+                    // 💡 「おすすめ」条件（共通趣味スコアが1以上）に該当する候補を、
+                    //    現在選択中のタブに関わらず常に計算しておく。
+                    //    これにより、ユーザータブ側にいても
+                    //    「おすすめの人が見つかったら自動的に戻す」判定ができる
+                    final List<QueryDocumentSnapshot> recommendDocs = docs
+                        .where((doc) {
+                          final targetData = doc.data() as Map<String, dynamic>;
+                          return getHobbyMatchScore(targetData) > 0;
+                        })
+                        .toList();
+
+                    final bool hasRecommendations =
+                        myCleanHobbies.isNotEmpty && recommendDocs.isNotEmpty;
+
                     // 2. 選択されたタブ（_selectedTab）に応じた【除外】および【ソート】
                     if (_selectedTab == 'recommend') {
-                      // おすすめ条件（共通趣味スコアが1以上）でフィルタリング
-                      final recommendDocs = docs.where((doc) {
-                        final targetData = doc.data() as Map<String, dynamic>;
-                        return getHobbyMatchScore(targetData) > 0;
-                      }).toList();
-
                       // 💡 自分のプロフィール（趣味・嗜好）が未設定、または手動選択以外でおすすめが0人の場合
-                      if (myCleanHobbies.isEmpty ||
-                          (recommendDocs.isEmpty && !_isManualSelection)) {
+                      if (!hasRecommendations && !_isManualSelection) {
                         WidgetsBinding.instance.addPostFrameCallback((_) {
                           if (mounted && _selectedTab == 'recommend') {
                             setState(() {
@@ -282,7 +322,7 @@ class _SearchScreenState extends State<SearchScreen> {
                             });
                           }
                         });
-                      } else {
+                      } else if (hasRecommendations) {
                         // プロフィールが設定されていて、おすすめユーザーが存在する場合
                         docs = recommendDocs;
                         docs.sort((a, b) {
@@ -299,6 +339,17 @@ class _SearchScreenState extends State<SearchScreen> {
                         });
                       }
                     } else if (_selectedTab == 'popular') {
+                      // 💡 手動選択でない状態で、おすすめの人が見つかった場合は
+                      //    自動的に「おすすめ」タブへ切り替える
+                      if (hasRecommendations && !_isManualSelection) {
+                        WidgetsBinding.instance.addPostFrameCallback((_) {
+                          if (mounted && _selectedTab != 'recommend') {
+                            setState(() {
+                              _selectedTab = 'recommend';
+                            });
+                          }
+                        });
+                      }
                       // 【人気順】いいね数（likeCount）が多い順にソート（プレミアム優先は適用しない）
                       docs.sort((a, b) {
                         final aData = a.data() as Map<String, dynamic>;
@@ -316,6 +367,17 @@ class _SearchScreenState extends State<SearchScreen> {
                         return bLikes.compareTo(aLikes);
                       });
                     } else {
+                      // 💡 手動選択でない状態で、おすすめの人が見つかった場合は
+                      //    自動的に「おすすめ」タブへ切り替える
+                      if (hasRecommendations && !_isManualSelection) {
+                        WidgetsBinding.instance.addPostFrameCallback((_) {
+                          if (mounted && _selectedTab != 'recommend') {
+                            setState(() {
+                              _selectedTab = 'recommend';
+                            });
+                          }
+                        });
+                      }
                       // 【ユーザー】プレミアムを最優先し、同じ優先度内は最終ログイン順（lastLoginTime）が新しい順にソート
                       docs.sort((a, b) {
                         final aData = a.data() as Map<String, dynamic>;

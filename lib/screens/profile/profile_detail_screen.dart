@@ -458,7 +458,7 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
     );
 
     // --- セクションごとの表示判定用リスト作成 ---
-    // 💡 学校・職業欄は編集画面から削除されたため、性別・居住地のみに整理
+    // 💡 学校・職業欄を復活（任意項目として編集画面に再追加されたため）
     final List<Widget> basicInfoTiles = [];
     if (_hasValue(data['gender'])) {
       basicInfoTiles.add(_buildDetailTile(Icons.wc, '性別', data['gender']));
@@ -467,6 +467,12 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
       basicInfoTiles.add(
         _buildDetailTile(Icons.location_on, '居住地', data['location']),
       );
+    }
+    if (_hasValue(data['school'])) {
+      basicInfoTiles.add(_buildDetailTile(Icons.school, '学校', data['school']));
+    }
+    if (_hasValue(data['work'])) {
+      basicInfoTiles.add(_buildDetailTile(Icons.work, '職業', data['work']));
     }
 
     // 💡 今月の新規トーク開始枠の上限に達しているかどうかを判定
@@ -723,7 +729,7 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
 
                   // 💡 「趣味・好きなもの」→「好きなこと（趣味）」に名称変更
                   if (_hasValue(data['hobby'])) ...[
-                    _buildSectionTitle('好きなこと（趣味）'),
+                    _buildSectionTitle('好きなこと・趣味'),
                     _buildContent(data['hobby']),
                   ],
 
@@ -734,8 +740,20 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
                   ],
 
                   if (_hasValue(data['idealFriend'])) ...[
-                    _buildSectionTitle('どんな友達が欲しい？'),
+                    _buildSectionTitle('どんな友達を作りたい？'),
                     _buildContent(data['idealFriend']),
+                  ],
+
+                  // 💡 「休日の過ごし方」欄を新規追加（任意）
+                  if (_hasValue(data['holidayActivity'])) ...[
+                    _buildSectionTitle('休日の過ごし方'),
+                    _buildContent(data['holidayActivity']),
+                  ],
+
+                  // 💡 「NGなこと・苦手なこと」欄を新規追加（任意）
+                  if (_hasValue(data['ngThings'])) ...[
+                    _buildSectionTitle('NGなこと・苦手なこと'),
+                    _buildContent(data['ngThings']),
                   ],
 
                   // 基本情報（性別・居住地のみ）
