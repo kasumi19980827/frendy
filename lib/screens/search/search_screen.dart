@@ -29,8 +29,35 @@ class _SearchScreenState extends State<SearchScreen> {
       'recommend'; // 'all' (ユーザー), 'recommend' (おすすめ), 'popular' (人気)
   bool _isManualSelection = false;
 
+  // 💡 画像URLを安全に取り出すヘルパー。
+  //    データが壊れていて先頭要素がnullや文字列以外だった場合でも
+  //    実行時エラーにならないようにする
+  String? _firstImageUrl(Map<String, dynamic> data) {
+    final dynamic urls = data['imageUrls'];
+    if (urls is! List || urls.isEmpty) return null;
+    final dynamic first = urls.first;
+    return first is String && first.isNotEmpty ? first : null;
+  }
+
   @override
   Widget build(BuildContext context) {
+    final String? myId = FirebaseAuth.instance.currentUser?.uid;
+
+    // 💡 未ログイン状態で.doc('')を呼ぶとFirestoreが不正な参照として
+    //    例外を投げてしまうため、ログインしていない場合はここで安全に止める
+    if (myId == null || myId.isEmpty) {
+      return const Scaffold(
+        backgroundColor: Colors.white,
+        body: Center(
+          child: Text(
+            'ログイン情報の確認中です。しばらくしてから再度お試しください。',
+            style: TextStyle(color: Colors.grey),
+            textAlign: TextAlign.center,
+          ),
+        ),
+      );
+    }
+
     return Scaffold(
       backgroundColor: Colors.white,
       appBar: AppBar(
@@ -79,15 +106,15 @@ class _SearchScreenState extends State<SearchScreen> {
                   return const Center(child: CircularProgressIndicator());
                 }
 
-                final String myId =
-                    FirebaseAuth.instance.currentUser?.uid ?? '';
-
                 return StreamBuilder<DocumentSnapshot>(
                   stream: FirebaseFirestore.instance
                       .collection('users')
                       .doc(myId)
                       .snapshots(),
                   builder: (context, mySnapshot) {
+                    if (mySnapshot.hasError) {
+                      return const Center(child: Text('エラーが発生しました'));
+                    }
                     if (!mySnapshot.hasData)
                       return const Center(child: CircularProgressIndicator());
 
@@ -474,9 +501,7 @@ class _SearchScreenState extends State<SearchScreen> {
     // 💡 「ハマっていること」の表示元を、存在しない'interests'から'recentInterest'に修正
     final String recentInterest = data['recentInterest'] ?? '未設定';
     final String target = data['idealFriend'] ?? '未設定';
-    final String? imageUrl = (data['imageUrls'] as List?)?.isNotEmpty == true
-        ? data['imageUrls'][0]
-        : null;
+    final String? imageUrl = _firstImageUrl(data);
 
     final IconData genderIcon = gender == '男性'
         ? Icons.male
@@ -590,7 +615,7 @@ class _SearchScreenState extends State<SearchScreen> {
                     ),
                   ),
                   const SizedBox(height: 16),
-                  _buildSectionTitle("どんな友達が欲しい？"),
+                  _buildSectionTitle("どんな友達を作りたい？"),
                   Text(
                     target,
                     style: const TextStyle(
@@ -620,9 +645,7 @@ class _SearchScreenState extends State<SearchScreen> {
     // 💡 存在しない'interests'フィールドの代わりに'recentInterest'を表示
     final String recentInterest =
         data['recentInterest'] ?? '最近特にハマってることはまだありません。';
-    final String? imageUrl = (data['imageUrls'] as List?)?.isNotEmpty == true
-        ? data['imageUrls'][0]
-        : null;
+    final String? imageUrl = _firstImageUrl(data);
 
     final double gridWidth = MediaQuery.of(context).size.width / 2;
     final int cacheWidth = (gridWidth * MediaQuery.of(context).devicePixelRatio)
@@ -922,8 +945,9 @@ class _SearchScreenState extends State<SearchScreen> {
                           onSelected: (val) {
                             setSheetState(() {
                               if (val) {
-                                if (_selectedTags.length < 5)
+                                if (!_selectedTags.contains(tag)) {
                                   _selectedTags.add(tag);
+                                }
                               } else {
                                 _selectedTags.remove(tag);
                               }

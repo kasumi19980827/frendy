@@ -5,6 +5,9 @@ import 'package:intl/intl.dart';
 class AdminMessagesScreen extends StatelessWidget {
   const AdminMessagesScreen({super.key});
 
+  // 💡 お知らせが増え続けても無制限に全件取得しないよう上限を設ける
+  static const int _messageFetchLimit = 100;
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -27,6 +30,7 @@ class AdminMessagesScreen extends StatelessWidget {
           stream: FirebaseFirestore.instance
               .collection('admin_messages')
               .orderBy('createdAt', descending: true)
+              .limit(_messageFetchLimit)
               .snapshots(),
           builder: (context, snapshot) {
             if (snapshot.hasError)
@@ -35,14 +39,30 @@ class AdminMessagesScreen extends StatelessWidget {
               return const Center(child: CircularProgressIndicator());
             }
 
-            List<DocumentSnapshot> messages = snapshot.data?.docs ?? [];
+            final List<DocumentSnapshot> messages = snapshot.data?.docs ?? [];
 
-            // Firestoreが空なら、ダミーデータを表示
+            // 💡 ダミー（架空）のお知らせを表示するのは、実在しない公式情報を
+            //    ユーザーに見せてしまうことになり、Apple審査でも問題視される。
+            //    実データが1件もない場合は、正直に「お知らせはありません」と表示する
             if (messages.isEmpty) {
-              return _buildDummyListView(context);
+              return const Center(
+                child: Padding(
+                  padding: EdgeInsets.all(24.0),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.mail_outline, size: 48, color: Colors.grey),
+                      SizedBox(height: 12),
+                      Text(
+                        '現在、お知らせはありません',
+                        style: TextStyle(color: Colors.grey, fontSize: 14),
+                      ),
+                    ],
+                  ),
+                ),
+              );
             }
 
-            // 本番用（Firestoreにデータがある場合）
             return ListView.builder(
               padding: EdgeInsets.zero, // 上下の不要なパディングをリセット
               itemCount: messages.length,
@@ -99,76 +119,6 @@ class AdminMessagesScreen extends StatelessWidget {
           },
         ),
       ),
-    );
-  }
-
-  // --- ★ダミーメッセージを表示するリストビュー（一番下にも確実に下線を引く仕様） ---
-  Widget _buildDummyListView(BuildContext context) {
-    final List<Map<String, String>> dummyData = [
-      {
-        'title': '【重要】安心・安全のためのパトロール強化について',
-        'body':
-            'いつもfrendyをごご利用いただきありがとうございます。\n\n運営事務局では、ユーザーの皆様に安心してご利用いただくため、24時間体制での通報確認およびプロフィール・メッセージのパトロールを強化しております。\n\n不適切な言動や規約違反を見かけた際は、お相手のプロフィール画面にある「通報」ボタンよりお知らせください。ご協力をお願いいたします。',
-        'date': '2026/06/01 12:00',
-      },
-      {
-        'title': 'プレミアム機能に新プランが登場しました！',
-        'body':
-            '会員の皆様のご要望にお応えし、新しく「ライト」「スタンダード」「プレミアム」の3つの選べるメンバーシッププランが登場しました！\n\nご自身の活動スタイルに合わせて、より効率よく素敵なお友達を探せるようになりました。詳細はマイページの「サブスクリプション管理」よりご確認ください！',
-        'date': '2025/05/25 18:30',
-      },
-      {
-        'title': 'frendyへようこそ！初めのステップガイド',
-        'body':
-            'ご登録ありがとうございます！frendy運営事務局です。\n\nまずは「プロフィール編集」から、あなたの趣味やハマっていること、普段見ているYouTubeチャンネルなどを詳しく書き込んでみましょう！\nプロフィールを充実させると、おすすめタブでのマッチング精度が大幅にアップします。素敵な繋がりが見つかることを応援しております！',
-        'date': '2025/05/15 10:00',
-      },
-    ];
-
-    return ListView.builder(
-      padding: EdgeInsets.zero, // ★余白で線が隠れないよう完全にゼロにする
-      itemCount: dummyData.length,
-      itemBuilder: (context, index) {
-        final item = dummyData[index];
-
-        return Container(
-          // ★最後の項目（index == 2）であっても、確実に bottom の枠線が描画される
-          decoration: BoxDecoration(
-            color: Colors.white,
-            border: Border(
-              bottom: BorderSide(color: Colors.grey[200]!, width: 1),
-            ),
-          ),
-          child: ListTile(
-            title: Text(
-              item['title']!,
-              style: const TextStyle(
-                fontWeight: FontWeight.bold,
-                fontSize: 15,
-                color: Colors.black87,
-              ),
-            ),
-            subtitle: Padding(
-              padding: const EdgeInsets.only(top: 6.0),
-              child: Text(
-                item['date']!,
-                style: const TextStyle(color: Colors.grey, fontSize: 12),
-              ),
-            ),
-            trailing: const Icon(
-              Icons.chevron_right,
-              color: Colors.grey,
-              size: 20,
-            ),
-            onTap: () => _showMessageDetail(
-              context,
-              item['title']!,
-              item['body']!,
-              item['date']!,
-            ),
-          ),
-        );
-      },
     );
   }
 

@@ -212,7 +212,7 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
     }
 
     if (_hobbyController.text.trim().isEmpty) {
-      return _showError('好きなこと・趣味を入力してください');
+      return _showError('好きなこと（趣味）を入力してください');
     }
 
     if (_recentInterestController.text.trim().isEmpty) {
@@ -268,7 +268,7 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
     try {
       await FirebaseStorage.instanceFor(
         bucket: _storageBucket,
-      ).refFromURL(url).delete();
+      ).refFromURL(url).delete().timeout(_networkTimeout);
     } catch (e) {
       debugPrint('孤立ファイル削除エラー（無視して続行）: $e');
     }
@@ -406,34 +406,42 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 8.0),
             child: OutlinedButton(
-              onPressed: () {
-                final profileData = {
-                  'name': _nameController.text,
-                  'age': _ageController.text,
-                  'location': _locationController.text,
-                  'hobby': _hobbyController.text,
-                  'recentInterest': _recentInterestController.text,
-                  'tags': _selectedTags,
-                  'imageUrls': _displayImages,
-                  'gender': _selectedGender,
-                  'values': _myValues,
-                  'idealFriend': _idealFriendController.text,
-                  'holidayActivity': _holidayController.text,
-                  'school': _schoolController.text,
-                  'work': _workController.text,
-                  'ngThings': _ngController.text,
-                };
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (context) =>
-                        ProfilePreviewScreen(data: profileData),
-                  ),
-                );
-              },
+              // 💡 保存処理中（画像アップロード中など）はプレビュー画面への
+              //    遷移も無効化し、中途半端な状態のデータでの画面遷移を防ぐ
+              onPressed: _isLoading
+                  ? null
+                  : () {
+                      final profileData = {
+                        'name': _nameController.text,
+                        'age': _ageController.text,
+                        'location': _locationController.text,
+                        'hobby': _hobbyController.text,
+                        'recentInterest': _recentInterestController.text,
+                        'tags': _selectedTags,
+                        'imageUrls': _displayImages,
+                        'gender': _selectedGender,
+                        'values': _myValues,
+                        'idealFriend': _idealFriendController.text,
+                        'holidayActivity': _holidayController.text,
+                        'school': _schoolController.text,
+                        'work': _workController.text,
+                        'ngThings': _ngController.text,
+                      };
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) =>
+                              ProfilePreviewScreen(data: profileData),
+                        ),
+                      );
+                    },
               style: OutlinedButton.styleFrom(
                 foregroundColor: AppColors.appbarText,
-                side: const BorderSide(color: AppColors.appbarText, width: 1.0),
+                disabledForegroundColor: Colors.grey[300],
+                side: BorderSide(
+                  color: _isLoading ? Colors.grey[300]! : AppColors.appbarText,
+                  width: 1.0,
+                ),
                 shape: const StadiumBorder(),
                 padding: const EdgeInsets.symmetric(horizontal: 12),
               ),
@@ -500,10 +508,10 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
                   ),
 
                   // 💡 「趣味・好きなもの」→「好きなこと（趣味）」に変更、入力欄を複数行に拡大
-                  _buildSectionTitle('好きなこと・趣味（必須）*'),
+                  _buildSectionTitle('好きなこと（趣味）（必須）*'),
                   _buildMultiLineField(
                     _hobbyController,
-                    '好きなこと・趣味を教えてください',
+                    '好きなこと（趣味）を教えてください',
                     maxLength: 100,
                   ),
                   // 💡 「趣味について詳しく」欄を削除し、代わりに「最近特にハマってること」を追加（必須）

@@ -123,8 +123,64 @@ class _ProfilePreviewScreenState extends State<ProfilePreviewScreen> {
                         width: screenWidth,
                         color: Colors.grey[200],
                         child: item is File
-                            ? Image.file(item, fit: BoxFit.cover)
-                            : Image.network(item.toString(), fit: BoxFit.cover),
+                            ? Image.file(
+                                item,
+                                fit: BoxFit.cover,
+                                // 💡 選択直後のローカルファイルが何らかの理由で
+                                //    読み込めなくなった場合でも、クラッシュせず
+                                //    代替表示にフォールバックする
+                                errorBuilder: (context, error, stackTrace) =>
+                                    Container(
+                                      color: Colors.grey[200],
+                                      child: const Icon(
+                                        Icons.broken_image,
+                                        size: 60,
+                                        color: Colors.grey,
+                                      ),
+                                    ),
+                              )
+                            : Image.network(
+                                item.toString(),
+                                fit: BoxFit.cover,
+                                // 💡 画像URLが無効・ネットワークエラー等の場合でも
+                                //    安定した表示を保つ（Apple審査のクラッシュ耐性要件対策）
+                                errorBuilder: (context, error, stackTrace) =>
+                                    Container(
+                                      color: Colors.grey[200],
+                                      child: const Icon(
+                                        Icons.broken_image,
+                                        size: 60,
+                                        color: Colors.grey,
+                                      ),
+                                    ),
+                                loadingBuilder: (context, child, loadingProgress) {
+                                  if (loadingProgress == null) {
+                                    return child;
+                                  }
+                                  return Container(
+                                    color: Colors.grey[100],
+                                    child: Center(
+                                      child: SizedBox(
+                                        width: 30,
+                                        height: 30,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                          color: AppColors.point,
+                                          value:
+                                              loadingProgress
+                                                      .expectedTotalBytes !=
+                                                  null
+                                              ? loadingProgress
+                                                        .cumulativeBytesLoaded /
+                                                    loadingProgress
+                                                        .expectedTotalBytes!
+                                              : null,
+                                        ),
+                                      ),
+                                    ),
+                                  );
+                                },
+                              ),
                       );
                     },
                   ),
@@ -280,7 +336,7 @@ class _ProfilePreviewScreenState extends State<ProfilePreviewScreen> {
 
                   // 💡 「好きなこと（趣味）」に名称変更（旧: 趣味・好きなこと）
                   if (_hasValue(widget.data['hobby'])) ...[
-                    _buildSectionTitle('好きなこと・趣味'),
+                    _buildSectionTitle('好きなこと（趣味）'),
                     _buildContent(widget.data['hobby']),
                   ],
 

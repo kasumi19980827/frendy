@@ -9,6 +9,8 @@ import 'package:matching_app/screens/auth/identity_verification_screen.dart';
 import 'package:matching_app/screens/auth/login_screen.dart';
 import 'package:matching_app/screens/profile/profile_setup_screen.dart';
 import 'package:matching_app/screens/settings/help_support_screen.dart';
+import 'package:matching_app/screens/settings/privacy_policy_screen.dart';
+import 'package:matching_app/screens/settings/terms_of_service_screen.dart';
 import 'package:matching_app/screens/subscription/subscription_screen.dart';
 import 'package:matching_app/screens/settings/app_settings_screen.dart';
 
@@ -21,9 +23,31 @@ class MypageScreen extends StatelessWidget {
   static const String _storageBucket =
       'gs://frendy-app-project.firebasestorage.app';
 
+  // 💡 各種ネットワーク処理のタイムアウト
+  static const Duration _networkTimeout = Duration(seconds: 30);
+
   @override
   Widget build(BuildContext context) {
     final String? currentUserId = FirebaseAuth.instance.currentUser?.uid;
+
+    // 💡 セッション切れ等でUIDが取得できない場合、.doc(null)で
+    //    意図しないドキュメントを参照してしまうのを防ぐため、
+    //    ログイン画面へ安全に誘導する
+    if (currentUserId == null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        Navigator.of(context, rootNavigator: true).pushAndRemoveUntil(
+          MaterialPageRoute(builder: (context) => const LoginScreen()),
+          (route) => false,
+        );
+        scaffoldMessengerKey.currentState?.showSnackBar(
+          const SnackBar(content: Text('セッションの有効期限が切れました。再度ログインしてください。')),
+        );
+      });
+      return const Scaffold(
+        backgroundColor: Colors.white,
+        body: Center(child: CircularProgressIndicator()),
+      );
+    }
 
     return Scaffold(
       backgroundColor: Colors.white,
@@ -67,198 +91,246 @@ class MypageScreen extends StatelessWidget {
           final data = snapshot.data?.data() as Map<String, dynamic>? ?? {};
           final List<dynamic> imageUrls = data['imageUrls'] ?? [];
           final String name = data['name'] ?? '名前未設定';
-          final String fullId = currentUserId ?? '--------';
+          final String fullId = currentUserId;
           final String shortId = fullId.length >= 8
               ? fullId.substring(0, 8)
               : fullId;
 
-          return SingleChildScrollView(
-            child: Column(
-              children: [
-                const SizedBox(height: 20),
-
-                // --- ヘッダーエリア：写真 ---
-                Center(
-                  child: ClipOval(
-                    child: Container(
-                      width: 110,
-                      height: 110,
-                      color: Colors.grey[200],
-                      child: imageUrls.isNotEmpty
-                          ? Image.network(
-                              imageUrls[0],
-                              fit: BoxFit.cover,
-                              cacheWidth: 330,
-                              cacheHeight: 330,
-                              loadingBuilder:
-                                  (context, child, loadingProgress) {
-                                    if (loadingProgress == null) return child;
-                                    return Center(
-                                      child: CircularProgressIndicator(
-                                        value:
-                                            loadingProgress
-                                                    .expectedTotalBytes !=
-                                                null
-                                            ? loadingProgress
-                                                      .cumulativeBytesLoaded /
-                                                  loadingProgress
-                                                      .expectedTotalBytes!
-                                            : null,
-                                        strokeWidth: 2,
-                                      ),
-                                    );
-                                  },
-                              errorBuilder: (context, error, stackTrace) =>
-                                  const Icon(Icons.error, color: Colors.red),
-                            )
-                          : Icon(
-                              Icons.person,
-                              size: 60,
-                              color: Colors.grey[400],
-                            ),
+          // 💡 画面が広い端末では設定項目リストの間隔を自動的に広げて
+          //    画面いっぱいに表示し、画面が狭い端末では詰まった状態のまま
+          //    スクロール可能にする（LayoutBuilder + ConstrainedBoxパターン）
+          return LayoutBuilder(
+            builder: (context, constraints) {
+              return SingleChildScrollView(
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(minHeight: constraints.maxHeight),
+                  child: IntrinsicHeight(
+                    child: _buildBody(
+                      context,
+                      name: name,
+                      fullId: fullId,
+                      shortId: shortId,
+                      imageUrls: imageUrls,
                     ),
                   ),
                 ),
-
-                const SizedBox(height: 15),
-
-                // --- 名前表示 ---
-                Text(
-                  name,
-                  style: const TextStyle(
-                    fontSize: 22,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-
-                const SizedBox(height: 5),
-
-                // --- ID表示 & コピー機能 ---
-                InkWell(
-                  onTap: () {
-                    Clipboard.setData(ClipboardData(text: fullId));
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: Text('ID: $shortId... をコピーしました'),
-                        behavior: SnackBarBehavior.floating,
-                        duration: const Duration(seconds: 2),
-                      ),
-                    );
-                  },
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        'ID: $shortId',
-                        style: const TextStyle(
-                          color: Colors.grey,
-                          fontSize: 14,
-                        ),
-                      ),
-                      const SizedBox(width: 4),
-                      const Icon(Icons.copy, size: 14, color: Colors.grey),
-                    ],
-                  ),
-                ),
-
-                const SizedBox(height: 12),
-                const Divider(thickness: 1, height: 1),
-
-                // --- 設定項目リスト ---
-                _buildSettingsItem(
-                  icon: Icons.edit,
-                  label: 'プロフィール編集',
-                  onTap: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (context) => const ProfileSetupScreen(),
-                      ),
-                    );
-                  },
-                ),
-                _buildSettingsItem(
-                  icon: Icons.card_membership,
-                  label: 'サブスクリプション管理',
-                  onTap: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (context) => const SubscriptionScreen(),
-                      ),
-                    );
-                  },
-                ),
-                _buildSettingsItem(
-                  icon: Icons.verified_user,
-                  label: '年齢確認・本人確認',
-                  onTap: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (context) =>
-                            const IdentityVerificationScreen(),
-                      ),
-                    );
-                  },
-                ),
-                _buildSettingsItem(
-                  icon: Icons.settings,
-                  label: 'アプリ設定',
-                  onTap: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (context) => const AppSettingsScreen(),
-                      ),
-                    );
-                  },
-                ),
-                _buildSettingsItem(
-                  icon: Icons.help_outline,
-                  label: 'ヘルプ・お問い合わせ',
-                  onTap: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (context) => const HelpSupportScreen(),
-                      ),
-                    );
-                  },
-                ),
-
-                const Divider(),
-
-                // ログアウト
-                _buildSettingsItem(
-                  icon: Icons.logout,
-                  label: 'ログアウト',
-                  labelColor: Colors.redAccent,
-                  onTap: () async {
-                    await FirebaseAuth.instance.signOut();
-                    if (context.mounted) {
-                      _forceNavigateToRoot(context, 'ログアウトしました');
-                    }
-                  },
-                ),
-
-                // 退会
-                _buildSettingsItem(
-                  icon: Icons.person_off,
-                  label: '退会する',
-                  labelColor: Colors.grey,
-                  onTap: () => _showDeleteDialog(context),
-                ),
-                const SizedBox(height: 40),
-              ],
-            ),
+              );
+            },
           );
         },
       ),
     );
   }
 
+  Widget _buildBody(
+    BuildContext context, {
+    required String name,
+    required String fullId,
+    required String shortId,
+    required List<dynamic> imageUrls,
+  }) {
+    return Column(
+      children: [
+        const SizedBox(height: 16),
+
+        // --- ヘッダーエリア：写真 ---
+        Center(
+          child: ClipOval(
+            child: Container(
+              width: 96,
+              height: 96,
+              color: Colors.grey[200],
+              child: imageUrls.isNotEmpty
+                  ? Image.network(
+                      imageUrls[0],
+                      fit: BoxFit.cover,
+                      cacheWidth: 330,
+                      cacheHeight: 330,
+                      loadingBuilder: (context, child, loadingProgress) {
+                        if (loadingProgress == null) return child;
+                        return Center(
+                          child: CircularProgressIndicator(
+                            value: loadingProgress.expectedTotalBytes != null
+                                ? loadingProgress.cumulativeBytesLoaded /
+                                      loadingProgress.expectedTotalBytes!
+                                : null,
+                            strokeWidth: 2,
+                          ),
+                        );
+                      },
+                      errorBuilder: (context, error, stackTrace) =>
+                          const Icon(Icons.error, color: Colors.red),
+                    )
+                  : Icon(Icons.person, size: 50, color: Colors.grey[400]),
+            ),
+          ),
+        ),
+
+        const SizedBox(height: 12),
+
+        // --- 名前表示 ---
+        Text(
+          name,
+          style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+        ),
+
+        const SizedBox(height: 4),
+
+        // --- ID表示 & コピー機能 ---
+        InkWell(
+          onTap: () {
+            Clipboard.setData(ClipboardData(text: fullId));
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('ID: $shortId... をコピーしました'),
+                behavior: SnackBarBehavior.floating,
+                duration: const Duration(seconds: 2),
+              ),
+            );
+          },
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'ID: $shortId',
+                style: const TextStyle(color: Colors.grey, fontSize: 14),
+              ),
+              const SizedBox(width: 4),
+              const Icon(Icons.copy, size: 14, color: Colors.grey),
+            ],
+          ),
+        ),
+
+        const SizedBox(height: 10),
+        const Divider(thickness: 1, height: 1),
+
+        // --- 設定項目リスト ---
+        //    💡 Expanded + spaceEvenly で、画面の余ったスペースぶん
+        //       項目間の間隔が自動的に広がるようにする
+        Expanded(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: [
+              _buildSettingsItem(
+                icon: Icons.edit,
+                label: 'プロフィール編集',
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => const ProfileSetupScreen(),
+                    ),
+                  );
+                },
+              ),
+              _buildSettingsItem(
+                icon: Icons.card_membership,
+                label: 'サブスクリプション管理',
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => const SubscriptionScreen(),
+                    ),
+                  );
+                },
+              ),
+              _buildSettingsItem(
+                icon: Icons.verified_user,
+                label: '年齢確認・本人確認',
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => const IdentityVerificationScreen(),
+                    ),
+                  );
+                },
+              ),
+              _buildSettingsItem(
+                icon: Icons.settings,
+                label: 'アプリ設定',
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => const AppSettingsScreen(),
+                    ),
+                  );
+                },
+              ),
+              _buildSettingsItem(
+                icon: Icons.help_outline,
+                label: 'ヘルプ・お問い合わせ',
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => const HelpSupportScreen(),
+                    ),
+                  );
+                },
+              ),
+
+              // 💡 プライバシーポリシー・利用規約への導線
+              _buildSettingsItem(
+                icon: Icons.privacy_tip_outlined,
+                label: 'プライバシーポリシー',
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => const PrivacyPolicyScreen(),
+                    ),
+                  );
+                },
+              ),
+              _buildSettingsItem(
+                icon: Icons.description_outlined,
+                label: '利用規約',
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => const TermsOfServiceScreen(),
+                    ),
+                  );
+                },
+              ),
+
+              const Divider(),
+
+              // ログアウト
+              _buildSettingsItem(
+                icon: Icons.logout,
+                label: 'ログアウト',
+                labelColor: Colors.redAccent,
+                onTap: () async {
+                  await FirebaseAuth.instance.signOut();
+                  if (context.mounted) {
+                    _forceNavigateToRoot(context, 'ログアウトしました');
+                  }
+                },
+              ),
+
+              // 退会
+              _buildSettingsItem(
+                icon: Icons.person_off,
+                label: '退会する',
+                labelColor: Colors.grey,
+                onTap: () => _showDeleteDialog(context),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 24),
+      ],
+    );
+  }
+
   // 設定項目の共通ウィジェット
+  //    💡 項目数が増えても「退会する」ボタンまで画面内に収まりやすいよう、
+  //       縦方向をコンパクトにしたデザインに変更
   Widget _buildSettingsItem({
     required IconData icon,
     required String label,
@@ -266,6 +338,9 @@ class MypageScreen extends StatelessWidget {
     Color labelColor = Colors.black87,
   }) {
     return ListTile(
+      dense: true,
+      visualDensity: const VisualDensity(horizontal: 0, vertical: -1),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 0),
       leading: Icon(icon, color: Colors.grey[600]),
       title: Text(label, style: TextStyle(color: labelColor, fontSize: 16)),
       trailing: const Icon(Icons.chevron_right, color: Colors.grey),
@@ -280,9 +355,11 @@ class MypageScreen extends StatelessWidget {
         bucket: _storageBucket,
       ).ref().child(path);
 
-      final listResult = await storageRef.listAll();
+      final listResult = await storageRef.listAll().timeout(_networkTimeout);
       // 💡 逐次削除ではなく並列削除にすることで、退会処理全体の待ち時間を短縮する
-      await Future.wait(listResult.items.map((item) => item.delete()));
+      await Future.wait(
+        listResult.items.map((item) => item.delete().timeout(_networkTimeout)),
+      );
     } catch (e) {
       // 対象フォルダが存在しない（＝画像未登録）場合などはここに来るため無視して続行
       debugPrint("Storage削除スキップ ($path): $e");
@@ -311,7 +388,8 @@ class MypageScreen extends StatelessWidget {
         final snapshot = await firestore
             .collection('users')
             .where(field, arrayContains: uid)
-            .get();
+            .get()
+            .timeout(_networkTimeout);
 
         // 💡 Firestoreのバッチ上限（500件）を考慮し、100件ごとに分けて処理する
         const int chunkSize = 100;
@@ -328,7 +406,7 @@ class MypageScreen extends StatelessWidget {
               field: FieldValue.arrayRemove([uid]),
             });
           }
-          await batch.commit();
+          await batch.commit().timeout(_networkTimeout);
         }
       } catch (e) {
         debugPrint('関連データ削除エラー（$field）: $e');
@@ -341,17 +419,19 @@ class MypageScreen extends StatelessWidget {
       final fromRequests = await firestore
           .collection('friend_requests')
           .where('fromId', isEqualTo: uid)
-          .get();
+          .get()
+          .timeout(_networkTimeout);
       final toRequests = await firestore
           .collection('friend_requests')
           .where('toId', isEqualTo: uid)
-          .get();
+          .get()
+          .timeout(_networkTimeout);
 
       final batch = firestore.batch();
       for (final doc in [...fromRequests.docs, ...toRequests.docs]) {
         batch.delete(doc.reference);
       }
-      await batch.commit();
+      await batch.commit().timeout(_networkTimeout);
     } catch (e) {
       debugPrint('友達申請の削除エラー: $e');
     }
@@ -387,7 +467,11 @@ class MypageScreen extends StatelessWidget {
       await _cleanupUserReferences(uid);
 
       // 3. Firestore のユーザープロフィールドキュメントを削除
-      await FirebaseFirestore.instance.collection('users').doc(uid).delete();
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(uid)
+          .delete()
+          .timeout(_networkTimeout);
 
       // 4. Firebase Auth のアカウント自体を削除
       try {
