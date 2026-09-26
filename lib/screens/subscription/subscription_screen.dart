@@ -2,6 +2,30 @@ import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:matching_app/constants/app_colors.dart';
+import 'package:matching_app/screens/settings/privacy_policy_screen.dart';
+import 'package:matching_app/screens/settings/terms_of_service_screen.dart';
+import 'package:matching_app/screens/settings/tokushoho_screen.dart';
+
+// ============================================================
+// 🔴🔴🔴 重要な警告（本番リリース前に必ず対応すること） 🔴🔴🔴
+// ------------------------------------------------------------
+// このファイルの _updatePlan() は、実際の決済（Apple In-App Purchase /
+// Google Play Billing）を一切経由せず、Firestoreの 'plan' フィールドを
+// 直接書き換えているだけです。
+//
+// つまり現状は「ボタンを押すだけで、お金を払わずに誰でもプレミアムプランに
+// なれてしまう」状態であり、収益化の仕組みとして機能していません。
+//
+// 本番リリース前に、最低限以下の対応が必要です：
+//   1. `in_app_purchase` パッケージを導入し、App Store Connect /
+//      Google Play Console で実際のサブスクリプション商品を登録する
+//   2. 購入完了後、Cloud Functions等のサーバー側でレシート（購入証明）を
+//      検証してから、'plan' フィールドを更新する
+//      （クライアントから直接 'plan' を書き換えられる今のFirestoreルールも
+//        あわせて見直し、クライアントからの直接書き込みは禁止すべき）
+//   3. 上記が完了するまでは、このプラン変更ボタンは「テスト用」の
+//      仮実装であることを明確に認識しておくこと
+// ============================================================
 
 class SubscriptionScreen extends StatefulWidget {
   const SubscriptionScreen({super.key});
@@ -11,13 +35,12 @@ class SubscriptionScreen extends StatefulWidget {
 }
 
 class _SubscriptionScreenState extends State<SubscriptionScreen> {
-  // 💡 デフォルト選択を「スタンダード」（インデックス: 2）に変更
-  int _selectedPlanIndex = 2;
+  static const Duration _networkTimeout = Duration(seconds: 20);
 
-  // 💡 プラン一覧のid順（Firestoreの現在プランとインデックスを対応させるため）
+  int _selectedPlanIndex = 2;
   final List<String> _planIds = ['free', 'light', 'standard', 'premium'];
 
-  String _currentPlan = 'free'; // Firestoreに保存されている現在のプラン
+  String _currentPlan = 'free';
   bool _isLoadingPlan = true;
   bool _isUpdatingPlan = false;
 
@@ -27,18 +50,18 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
     _loadCurrentPlan();
   }
 
-  // 💡 現在のプランをFirestoreから取得
   Future<void> _loadCurrentPlan() async {
     final String? uid = FirebaseAuth.instance.currentUser?.uid;
     if (uid == null) {
-      setState(() => _isLoadingPlan = false);
+      if (mounted) setState(() => _isLoadingPlan = false);
       return;
     }
     try {
       final doc = await FirebaseFirestore.instance
           .collection('users')
           .doc(uid)
-          .get();
+          .get()
+          .timeout(_networkTimeout);
       final String plan = doc.data()?['plan'] ?? 'free';
       if (mounted) {
         setState(() {
@@ -54,16 +77,17 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
     }
   }
 
-  // 💡 選択中のプランをFirestoreに書き込み、実際にプランを変更する
   Future<void> _updatePlan(String newPlanId, String newPlanName) async {
     final String? uid = FirebaseAuth.instance.currentUser?.uid;
     if (uid == null) return;
 
     setState(() => _isUpdatingPlan = true);
     try {
-      await FirebaseFirestore.instance.collection('users').doc(uid).update({
-        'plan': newPlanId,
-      });
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(uid)
+          .update({'plan': newPlanId})
+          .timeout(_networkTimeout);
       if (mounted) {
         setState(() {
           _currentPlan = newPlanId;
@@ -92,7 +116,6 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // 💡 フリープランを追加し、各プランの内容・価格を修正
     final List<Map<String, dynamic>> plans = [
       {
         'id': 'free',
@@ -111,7 +134,7 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
           {'title': 'メッセージ最大15人／月', 'desc': '最大15人の気になる相手と会話を始めることができます。'},
           {'title': '足跡の表示', 'desc': 'あなたのプロフィールを見た人がわかります。'},
         ],
-        'color': const Color(0xFFFF9800), // オレンジ
+        'color': const Color(0xFFFF9800),
       },
       {
         'id': 'standard',
@@ -122,8 +145,8 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
           {'title': '足跡の表示', 'desc': 'あなたのプロフィールを見た人がわかります。'},
           {'title': 'いいねされた人を見れる', 'desc': 'あなたにいいねしたお相手を確認できます。'},
         ],
-        'color': const Color(0xFF4CAF50), // グリーン
-        'isPopular': true, // 🔥 人気バッジをスタンダードに設定
+        'color': const Color(0xFF4CAF50),
+        'isPopular': true,
       },
       {
         'id': 'premium',
@@ -303,7 +326,6 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
 
                     const SizedBox(height: 32),
 
-                    // --- 選択中のプランの特典内容一覧 ---
                     Text(
                       '${plans[_selectedPlanIndex]['name']}プランの機能',
                       style: const TextStyle(
@@ -327,7 +349,6 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
 
                     const SizedBox(height: 24),
 
-                    // --- 現在のプラン表示 ---
                     Container(
                       width: double.infinity,
                       padding: const EdgeInsets.all(16),
@@ -360,9 +381,9 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
                       ),
                     ),
 
-                    const SizedBox(height: 32),
+                    const SizedBox(height: 24),
 
-                    // --- アクションボタン ---
+                    // --- アクションボタン（注意書きより先に、目立つ位置に配置） ---
                     SizedBox(
                       width: double.infinity,
                       height: 56,
@@ -413,17 +434,75 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
                       ),
                     ),
 
+                    const SizedBox(height: 20),
+
+                    // 💡 Appleガイドライン3.1.2対応：サブスクリプションの自動更新・
+                    //    解約方法について、画面上に明記する（フッターのリンクだけに頼らない）
+                    if (plans[_selectedPlanIndex]['id'] != 'free')
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          color: Colors.blue.withOpacity(0.05),
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Icon(
+                              Icons.info_outline,
+                              size: 18,
+                              color: Colors.blueGrey,
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                '${plans[_selectedPlanIndex]['name']}プランは月額¥${plans[_selectedPlanIndex]['price']}（税込）の自動更新サブスクリプションです。'
+                                '契約期間は1ヶ月で、期間終了の24時間前までに解約しない限り、自動的に更新され、更新料が請求されます。'
+                                '解約は、ご利用の端末のApp StoreまたはGoogle Playのサブスクリプション管理画面からいつでも行えます。',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  height: 1.6,
+                                  color: Colors.grey[800],
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+
                     const SizedBox(height: 40),
 
-                    // --- ストア審査対策：各種規約リンク ---
                     Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        _buildFooterLink('利用規約', () {}),
+                        _buildFooterLink('利用規約', () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (context) =>
+                                  const TermsOfServiceScreen(),
+                            ),
+                          );
+                        }),
                         _buildFooterDivider(),
-                        _buildFooterLink('プライバシーポリシー', () {}),
+                        _buildFooterLink('プライバシーポリシー', () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (context) => const PrivacyPolicyScreen(),
+                            ),
+                          );
+                        }),
                         _buildFooterDivider(),
-                        _buildFooterLink('特商法表記', () {}),
+                        _buildFooterLink('特商法表記', () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (context) => const TokushohoScreen(),
+                            ),
+                          );
+                        }),
                       ],
                     ),
                     const SizedBox(height: 16),
@@ -434,7 +513,6 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
     );
   }
 
-  // 💡 planIdからプラン名を取得するヘルパー
   String _planNameOf(List<Map<String, dynamic>> plans, String planId) {
     final match = plans.firstWhere(
       (p) => p['id'] == planId,
