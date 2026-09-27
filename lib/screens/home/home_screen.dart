@@ -64,17 +64,6 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // 💡 AppBarのホームアイコン：ページ最上部へスクロールする実機能を持たせる
-  //    （何も起きない「死んだボタン」を審査で指摘されないようにするため）
-  void _scrollToTop() {
-    if (!_scrollController.hasClients) return;
-    _scrollController.animateTo(
-      0,
-      duration: const Duration(milliseconds: 300),
-      curve: Curves.easeOut,
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -86,13 +75,6 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
         centerTitle: true,
         elevation: 0,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.home, color: Colors.black),
-            tooltip: '最上部へ戻る',
-            onPressed: _scrollToTop,
-          ),
-        ],
       ),
       body: SingleChildScrollView(
         controller: _scrollController,

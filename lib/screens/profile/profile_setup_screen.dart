@@ -212,7 +212,7 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
     }
 
     if (_hobbyController.text.trim().isEmpty) {
-      return _showError('好きなこと（趣味）を入力してください');
+      return _showError('好きなこと・趣味を入力してください');
     }
 
     if (_recentInterestController.text.trim().isEmpty) {
@@ -508,10 +508,10 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
                   ),
 
                   // 💡 「趣味・好きなもの」→「好きなこと（趣味）」に変更、入力欄を複数行に拡大
-                  _buildSectionTitle('好きなこと（趣味）（必須）*'),
+                  _buildSectionTitle('好きなこと・趣味（必須）*'),
                   _buildMultiLineField(
                     _hobbyController,
-                    '好きなこと（趣味）を教えてください',
+                    '好きなこと・趣味を教えてください',
                     maxLength: 100,
                   ),
                   // 💡 「趣味について詳しく」欄を削除し、代わりに「最近特にハマってること」を追加（必須）

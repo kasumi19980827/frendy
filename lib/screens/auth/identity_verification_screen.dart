@@ -362,7 +362,7 @@ class _IdentityVerificationScreenState
                     ),
                     const SizedBox(height: 10),
                     const Text(
-                      'frendyは、安心・安全な友達作りのコミュニティを維持するため、18歳未満の方の利用を制限しています。メッセージ送信や広場の利用には、身分証による年齢確認が必須となります。',
+                      'frendyは、安心・安全な友達作りのコミュニティを維持するため、18歳未満の方の利用を制限しています。メッセージ送信の利用には、身分証による年齢確認が必須となります。',
                       style: TextStyle(
                         fontSize: 14,
                         color: Colors.black54,
@@ -719,7 +719,7 @@ class _IdentityVerificationScreenState
           ),
           const SizedBox(height: 12),
           const Text(
-            'ご協力ありがとうございました！\n年齢確認が正常に完了しています。安心・安全なコミュニティ作りへのご協力に感謝いたします。\n\nfrendyのすべての機能（広場でのチャット、マッチした友達とのメッセージやり取り）を心ゆくまでお楽しみください！',
+            'ご協力ありがとうございました！\n年齢確認が正常に完了しています。安心・安全なコミュニティ作りへのご協力に感謝いたします。\n\nfrendyの機能（マッチした友達とのメッセージやり取り）を心ゆくまでお楽しみください！',
             textAlign: TextAlign.center,
             style: TextStyle(fontSize: 13, color: Colors.black54, height: 1.6),
           ),

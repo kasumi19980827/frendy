@@ -72,8 +72,6 @@ class _SearchScreenState extends State<SearchScreen> {
               _buildTabButton('ユーザー', 'all'),
               const SizedBox(width: 12),
               _buildTabButton('おすすめ', 'recommend'),
-              const SizedBox(width: 12),
-              _buildTabButton('人気', 'popular'),
               const Spacer(),
               const Text(
                 'frendy',

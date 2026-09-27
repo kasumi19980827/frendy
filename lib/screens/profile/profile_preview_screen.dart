@@ -336,7 +336,7 @@ class _ProfilePreviewScreenState extends State<ProfilePreviewScreen> {
 
                   // 💡 「好きなこと（趣味）」に名称変更（旧: 趣味・好きなこと）
                   if (_hasValue(widget.data['hobby'])) ...[
-                    _buildSectionTitle('好きなこと（趣味）'),
+                    _buildSectionTitle('好きなこと・趣味'),
                     _buildContent(widget.data['hobby']),
                   ],
 

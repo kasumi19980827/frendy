@@ -8,6 +8,7 @@ import 'package:cached_network_image/cached_network_image.dart'; // ★追加：
 import 'package:matching_app/constants/app_colors.dart';
 import 'package:matching_app/screens/talk/talk_screen.dart' hide AppColors;
 import 'package:matching_app/screens/subscription/subscription_screen.dart'; // 💡 追加：メンバーシップ画面へ遷移させるため
+import 'package:matching_app/screens/profile/profile_setup_screen.dart'; // 💡 追加：プロフィール未完成時の誘導先
 
 class ProfileDetailScreen extends StatefulWidget {
   final Map<String, dynamic> userData; // Firestoreからのデータ
@@ -32,6 +33,15 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
   int _monthlyNewTalkCount = 0; // 今月すでに使った新規トーク開始枠の数
   bool _hasChatHistoryWithThisPeer = false;
   bool _isLoadingLimits = true;
+
+  // 💡 自分自身のプロフィールの名前。未設定のままだと、
+  //    誰にもトークを開始できないようにするためのガードに使う
+  //    （search_screen.dartのプロフィール完成判定と同じ基準に揃えている）
+  String _myName = '';
+  bool get _isMyNameMissing {
+    final String trimmed = _myName.trim();
+    return trimmed.isEmpty || trimmed == '名前未設定' || trimmed == 'ユーザー';
+  }
 
   // 💡 ブロック関係の状態（自分が相手をブロック、または相手から自分がブロックされている場合はtrue）
   bool _iBlockedPeer = false;
@@ -98,6 +108,7 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
       if (myDoc.exists) {
         final myData = myDoc.data() ?? {};
         _myPlan = myData['plan'] ?? 'free';
+        _myName = (myData['name'] ?? '').toString();
 
         // 💡 保存されている集計対象月と「今月」が違えば、表示上は0人扱いにする
         //    （実際のFirestore側のリセットは、次回消費時にトランザクションで行う）
@@ -281,6 +292,57 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
             },
             child: const Text(
               'プラン一覧を見る',
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // 💡 自分の名前が未設定のままトークしようとした時に表示する誘導ダイアログ
+  void _showProfileIncompleteDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text(
+          'プロフィールを設定してください',
+          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+        ),
+        content: const Text(
+          'トークを始めるには、まずニックネームを設定する必要があります。プロフィール編集画面から設定してください。',
+          style: TextStyle(fontSize: 14, height: 1.5, color: Colors.black54),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text(
+              '閉じる',
+              style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold),
+            ),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.point,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+              elevation: 0,
+            ),
+            onPressed: () {
+              Navigator.pop(context); // アラートを閉じる
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const ProfileSetupScreen()),
+              );
+            },
+            child: const Text(
+              'プロフィールを編集する',
               style: TextStyle(
                 color: Colors.white,
                 fontWeight: FontWeight.bold,
@@ -1141,9 +1203,11 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
                       label: Text(
                         _isBlockedRelationship
                             ? '利用できません'
-                            : (isMonthlyLimitReached
-                                  ? '今月のトーク開始上限です'
-                                  : 'トークする'),
+                            : (_isMyNameMissing
+                                  ? 'プロフィール未設定です'
+                                  : (isMonthlyLimitReached
+                                        ? '今月のトーク開始上限です'
+                                        : 'トークする')),
                         style: const TextStyle(
                           color: Colors.white,
                           fontWeight: FontWeight.bold,
@@ -1151,18 +1215,23 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
                         ),
                       ),
                       // 💡 1. 自分のプロフィール、または相手とブロック関係の場合はボタン無効
-                      // 💡 2. 新規相手で今月の上限に達している場合はボタンを完全に無効化（グレーアウト）
+                      // 💡 2. 自分のニックネームが未設定の場合は、プロフィール編集画面へ誘導
+                      // 💡 3. 新規相手で今月の上限に達している場合はプラン案内ダイアログを表示
                       onPressed: (isMyProfile || _isBlockedRelationship)
                           ? null
-                          : (isMonthlyLimitReached
-                                ? () =>
-                                      _showLimitReachedDialog(
-                                        _allowedLimit,
-                                      ) // タップ時にプラン案内ダイアログを表示
-                                : _handleTalkTransition), // 正常時
+                          : (_isMyNameMissing
+                                ? _showProfileIncompleteDialog // タップ時にプロフィール編集へ誘導
+                                : (isMonthlyLimitReached
+                                      ? () =>
+                                            _showLimitReachedDialog(
+                                              _allowedLimit,
+                                            ) // タップ時にプラン案内ダイアログを表示
+                                      : _handleTalkTransition)), // 正常時
                       style: ElevatedButton.styleFrom(
                         backgroundColor:
-                            (isMonthlyLimitReached || _isBlockedRelationship)
+                            (isMonthlyLimitReached ||
+                                _isBlockedRelationship ||
+                                _isMyNameMissing)
                             ? Colors.grey[400]
                             : AppColors.point,
                         elevation: 0,
