@@ -74,7 +74,7 @@ class _SearchScreenState extends State<SearchScreen> {
               _buildTabButton('おすすめ', 'recommend'),
               const Spacer(),
               const Text(
-                'frendy',
+                'Frendy',
                 style: TextStyle(
                   fontWeight: FontWeight.bold,
                   color: Colors.black87,

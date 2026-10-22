@@ -6,7 +6,7 @@ class HelpSupportScreen extends StatelessWidget {
   const HelpSupportScreen({super.key});
 
   // 💡 お問い合わせ先メールアドレス（実際の窓口アドレスに差し替えてください）
-  static const String _supportEmail = 'support@frendy-app.jp';
+  static const String _supportEmail = 'frendy.support@gmail.com';
 
   // 💡 よくある質問データ
   //    カテゴリごとにグルーピングし、上から順に表示

@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
@@ -19,7 +19,7 @@ class IdentityVerificationScreen extends StatefulWidget {
 class _IdentityVerificationScreenState
     extends State<IdentityVerificationScreen> {
   User? get currentUser => FirebaseAuth.instance.currentUser;
-  String get myId => currentUser?.uid ?? "";
+  String get myId => currentUser?.uid ?? '';
 
   File? _imageFile;
   final ImagePicker _picker = ImagePicker();
@@ -29,21 +29,27 @@ class _IdentityVerificationScreenState
   String _verificationStatus = 'unsubmitted';
   String _rejectionReason = '';
 
-  // 💡 身分証画像を格納するStorageバケット。
-  //    本来は複数画面で使い回すため constants/app_config.dart 等に
-  //    一元化するのが望ましいが、既存構成に合わせてここに定義する
+  // 💡 ステータスの読み込み状態
+  bool _isStatusLoading = true;
+  bool _statusLoadFailed = false;
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _statusSub;
+
+  // 💡 身分証画像を格納するStorageバケット
   static const String _storageBucket =
       'gs://frendy-app-project.firebasestorage.app';
 
-  // 💡 アップロード前に弾く上限ファイルサイズ（8MB）
-  //    サーバー・ストレージコストの肥大化と、低速回線での失敗を防ぐ
+  // 💡 1人につき1枚だけ保存する（再提出のたびに上書きする）。
+  //    提出のたびに別名で保存すると、古い身分証が溜まり続けて
+  //    ストレージ代がかさむうえ、不要な個人情報を持ち続けることになるため
+  static const String _verificationFileName = 'verification_image';
+
+  // 💡 アップロード前に弾く上限ファイルサイズ（8MB）。Storageのルールでも同じ上限で弾く
   static const int _maxFileSizeBytes = 8 * 1024 * 1024;
 
-  // 💡 アップロード自体のタイムアウト。不安定な回線で無限に固まるのを防ぐ
   static const Duration _uploadTimeout = Duration(seconds: 60);
+  static const Duration _networkTimeout = Duration(seconds: 20);
 
   // 💡 失敗直後の連続再送信を防ぐクールダウン（秒）
-  //    障害発生時に大量ユーザーが同時リトライする「リトライの雪崩」を緩和する
   static const int _resubmitCooldownSeconds = 10;
 
   Timer? _cooldownTimer;
@@ -52,53 +58,77 @@ class _IdentityVerificationScreenState
   @override
   void initState() {
     super.initState();
-    _loadVerificationStatus();
+    _listenVerificationStatus();
   }
 
   @override
   void dispose() {
     _cooldownTimer?.cancel();
+    _statusSub?.cancel();
     super.dispose();
   }
 
-  Future<void> _loadVerificationStatus() async {
+  // ==========================================
+  // 審査状況をリアルタイムで受け取る
+  // ==========================================
+  //    運営が承認・否認したら、画面を開いたままでもすぐに表示が切り替わる
+  void _listenVerificationStatus() {
+    _statusSub?.cancel();
+
     if (myId.isEmpty) {
-      _showSnackBar("【警告】ログイン状態が確認できません。", Colors.redAccent);
+      _isStatusLoading = false;
+      _statusLoadFailed = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _showSnackBar('ログイン状態が確認できません。再ログインしてください。', Colors.redAccent);
+      });
       return;
     }
 
-    try {
-      final doc = await FirebaseFirestore.instance
-          .collection('users')
-          .doc(myId)
-          .get();
-
-      // 💡 非同期処理の完了時点で画面が破棄されていないかを必ず確認する
-      if (!mounted) return;
-
-      if (doc.exists) {
-        final data = doc.data() as Map<String, dynamic>;
-        setState(() {
-          _verificationStatus = data['ageVerified'] ?? 'unsubmitted';
-          _rejectionReason = data['verificationRejectionReason'] ?? '';
-        });
-      }
-    } catch (e) {
-      // 💡 内部エラーの詳細はログにのみ残し、ユーザーには汎用メッセージのみ表示する
-      debugPrint("ステータス取得エラー: $e");
-      if (mounted) {
-        _showSnackBar("ステータスの取得に失敗しました。時間をおいて再度お試しください。", Colors.redAccent);
-      }
-    }
+    _statusSub = FirebaseFirestore.instance
+        .collection('users')
+        .doc(myId)
+        .snapshots()
+        .listen(
+          (doc) {
+            if (!mounted) return;
+            final data = doc.data();
+            setState(() {
+              _verificationStatus =
+                  (data?['ageVerified'] as String?) ?? 'unsubmitted';
+              _rejectionReason =
+                  (data?['verificationRejectionReason'] as String?) ?? '';
+              _isStatusLoading = false;
+              _statusLoadFailed = false;
+            });
+          },
+          onError: (e) {
+            debugPrint('ステータス取得エラー: $e');
+            if (!mounted) return;
+            setState(() {
+              _isStatusLoading = false;
+              _statusLoadFailed = true;
+            });
+          },
+        );
   }
 
+  void _retryLoadStatus() {
+    setState(() {
+      _isStatusLoading = true;
+      _statusLoadFailed = false;
+    });
+    _listenVerificationStatus();
+  }
+
+  // ==========================================
+  // 画像の選択
+  // ==========================================
   Future<void> _pickImage(ImageSource source) async {
     try {
       final XFile? pickedFile = await _picker.pickImage(
         source: source,
-        imageQuality: 50,
-        // 💡 解像度の上限を設定し、高解像度端末でもファイルサイズが
-        //    際限なく大きくならないようにする（帯域・ストレージ対策）
+        // 💡 身分証の文字（生年月日など）が読めなくならないよう、画質は高めに保つ
+        imageQuality: 80,
         maxWidth: 1600,
         maxHeight: 1600,
       );
@@ -106,163 +136,150 @@ class _IdentityVerificationScreenState
 
       final File file = File(pickedFile.path);
 
-      // 💡 アップロード前にファイルサイズを検証する
       final int fileSize = await file.length();
       if (fileSize > _maxFileSizeBytes) {
-        if (mounted) {
-          _showSnackBar(
-            "ファイルサイズが大きすぎます（上限8MB）。別の写真をお試しください。",
-            Colors.redAccent,
-          );
-        }
+        _showSnackBar('ファイルサイズが大きすぎます（上限8MB）。別の写真をお試しください。', Colors.redAccent);
         return;
       }
 
       if (!mounted) return;
-      setState(() {
-        _imageFile = file;
-      });
-      debugPrint("画像取得に成功: ${pickedFile.path}（${fileSize ~/ 1024}KB）");
+      setState(() => _imageFile = file);
     } catch (e) {
-      debugPrint("画像取得エラー: $e");
-      if (mounted) {
-        _showSnackBar("画像の取得に失敗しました。もう一度お試しください。", Colors.redAccent);
-      }
+      debugPrint('画像取得エラー: $e');
+      _showSnackBar(
+        '画像の取得に失敗しました。カメラ・写真へのアクセスが許可されているかご確認ください。',
+        Colors.redAccent,
+      );
     }
   }
 
+  // 💡 ファイルの拡張子から、正しい画像の種類を判定する
+  String _contentTypeFor(String path) {
+    final String lower = path.toLowerCase();
+    if (lower.endsWith('.png')) return 'image/png';
+    if (lower.endsWith('.heic') || lower.endsWith('.heif')) return 'image/heic';
+    return 'image/jpeg';
+  }
+
+  // ==========================================
+  // 提出
+  // ==========================================
   Future<void> _submitVerification() async {
-    // 💡 多重送信・連打防止。ローディング中・クールダウン中は何もしない
     if (_isLoading || _cooldownSeconds > 0) return;
 
-    if (_imageFile == null) {
-      _showSnackBar("確認書類の写真を選択してください。", Colors.redAccent);
+    final File? imageFile = _imageFile;
+    if (imageFile == null) {
+      _showSnackBar('確認書類の写真を選択してください。', Colors.redAccent);
       return;
     }
 
     final user = currentUser;
-    if (user == null || myId.isEmpty) {
-      _showErrorDialog(title: "認証エラー", message: "ログイン情報が取得できません。再ログインしてください。");
+    if (user == null) {
+      _showErrorDialog(title: '認証エラー', message: 'ログイン情報が取得できません。再ログインしてください。');
       return;
     }
+    final String uid = user.uid;
+    final String storagePath = 'user_verifications/$uid/$_verificationFileName';
 
     setState(() {
       _isLoading = true;
       _uploadProgress = 0;
     });
 
-    String? downloadUrl;
-
     // ==========================================
-    // STEP 1: Storage アップロード
+    // STEP 1: Storage にアップロード
     // ==========================================
+    StreamSubscription<TaskSnapshot>? progressSub;
     try {
-      final String fileName =
-          '${myId}_verification_${DateTime.now().millisecondsSinceEpoch}.jpg';
-
-      final FirebaseStorage storageInstance = FirebaseStorage.instanceFor(
+      final Reference storageRef = FirebaseStorage.instanceFor(
         bucket: _storageBucket,
+      ).ref().child(storagePath);
+
+      // 💡 putFileはファイルを少しずつ送るので、画像全体をメモリに読み込まずに済む
+      final UploadTask uploadTask = storageRef.putFile(
+        imageFile,
+        SettableMetadata(contentType: _contentTypeFor(imageFile.path)),
       );
 
-      final Reference storageRef = storageInstance.ref().child(
-        'user_verifications/$myId/$fileName',
-      );
-      debugPrint("Storageアップロード開始。パス: user_verifications/$myId/$fileName");
+      progressSub = uploadTask.snapshotEvents.listen((snapshot) {
+        if (!mounted || snapshot.totalBytes == 0) return;
+        setState(() {
+          _uploadProgress = snapshot.bytesTransferred / snapshot.totalBytes;
+        });
+      });
 
-      final Uint8List fileBytes = await _imageFile!.readAsBytes();
-
-      final UploadTask uploadTask = storageRef.putData(
-        fileBytes,
-        SettableMetadata(contentType: 'image/jpeg'),
-      );
-
-      // 💡 進捗をUIに反映し、ユーザーに「固まっていない」ことを伝える
-      final StreamSubscription<TaskSnapshot> progressSub = uploadTask
-          .snapshotEvents
-          .listen((snapshot) {
-            if (!mounted || snapshot.totalBytes == 0) return;
-            setState(() {
-              _uploadProgress = snapshot.bytesTransferred / snapshot.totalBytes;
-            });
-          });
-
-      final TaskSnapshot snapshot = await uploadTask.timeout(
+      await uploadTask.timeout(
         _uploadTimeout,
         onTimeout: () {
           uploadTask.cancel();
           throw TimeoutException('アップロードがタイムアウトしました');
         },
       );
-      await progressSub.cancel();
 
-      downloadUrl = await snapshot.ref.getDownloadURL();
-      debugPrint("Storageアップロード成功！");
+      // 💡 ダウンロードURLは取得しない・保存しない。
+      //    ダウンロードURLは「知っている人なら誰でも見られる」URLなので、
+      //    Firestoreに保存すると身分証が流出する原因になる
     } on TimeoutException {
-      if (mounted) {
-        setState(() => _isLoading = false);
-        _showErrorDialog(
-          title: "アップロードに失敗しました",
-          message: "通信状況が不安定なようです。電波の良い場所で、もう一度お試しください。",
-        );
-        _startCooldown();
-      }
+      _handleSubmitFailure('通信状況が不安定なようです。電波の良い場所で、もう一度お試しください。');
       return;
     } catch (e) {
-      // 💡 内部エラー詳細（バケット名・パス等）はユーザーへ見せずログにのみ残す。
-      //    Storageのアクセス権限はサーバー側のセキュリティルールで
-      //    厳格に管理するものであり、エンドユーザーへ設定変更を案内してはならない
-      //    （身分証画像を公開設定にしてしまうと重大な情報漏洩につながる）
-      debugPrint("Storageアップロードエラー: $e");
-      if (mounted) {
-        setState(() => _isLoading = false);
-        _showErrorDialog(
-          title: "アップロードに失敗しました",
-          message: "画像のアップロードに失敗しました。通信環境をご確認のうえ、もう一度お試しください。",
-        );
-        _startCooldown();
-      }
+      debugPrint('Storageアップロードエラー: $e');
+      _handleSubmitFailure('画像のアップロードに失敗しました。通信環境をご確認のうえ、もう一度お試しください。');
       return;
+    } finally {
+      await progressSub?.cancel();
     }
 
     // ==========================================
-    // STEP 2: Firestore への書き込み
+    // STEP 2: Firestore に提出記録を保存
     // ==========================================
+    //    - verification_requests/{uid}：画像の保存場所（本人も含めて誰も読めない。運営がコンソールで確認）
+    //    - users/{uid}：審査状況（「審査中」にする）
+    //    2つを同時に書き込み、片方だけ保存される状態を防ぐ
     try {
-      debugPrint("Firestoreの更新を開始します。UID: $myId");
+      if (mounted) setState(() => _uploadProgress = null);
 
-      await FirebaseFirestore.instance.collection('users').doc(myId).set({
+      final db = FirebaseFirestore.instance;
+      final batch = db.batch();
+
+      batch.set(db.collection('verification_requests').doc(uid), {
+        'imagePath': storagePath,
+        'submittedAt': FieldValue.serverTimestamp(),
+      });
+
+      batch.set(db.collection('users').doc(uid), {
         'ageVerified': 'pending',
-        'verificationImageUrl': downloadUrl,
-        'verificationSubmittedAt': Timestamp.now(),
+        'verificationSubmittedAt': FieldValue.serverTimestamp(),
         'verificationRejectionReason': '',
+        // 💡 以前のバージョンで保存していた、誰でも見られる身分証のURLを消す
+        'verificationImageUrl': FieldValue.delete(),
       }, SetOptions(merge: true));
 
-      debugPrint("Firestoreの更新に成功しました。");
+      await batch.commit().timeout(_networkTimeout);
 
       if (!mounted) return;
       setState(() {
         _verificationStatus = 'pending';
         _imageFile = null;
+        _isLoading = false;
       });
-
-      _showSnackBar("身分証を提出しました。確認完了までしばらくお待ちください。", Colors.green);
+      _showSnackBar('身分証を提出しました。確認完了までしばらくお待ちください。', Colors.green);
+    } on TimeoutException {
+      _handleSubmitFailure('通信がタイムアウトしました。電波の良い場所で、もう一度お試しください。');
     } catch (e) {
-      debugPrint("Firestore更新エラー: $e");
-      if (mounted) {
-        _showErrorDialog(
-          title: "送信に失敗しました",
-          message: "画像の送信中にエラーが発生しました。もう一度お試しください。",
-        );
-        _startCooldown();
-      }
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-          _uploadProgress = null;
-        });
-      }
+      debugPrint('Firestore更新エラー: $e');
+      _handleSubmitFailure('送信中にエラーが発生しました。もう一度お試しください。');
     }
+  }
+
+  void _handleSubmitFailure(String message) {
+    if (!mounted) return;
+    setState(() {
+      _isLoading = false;
+      _uploadProgress = null;
+    });
+    _showErrorDialog(title: '提出に失敗しました', message: message);
+    _startCooldown();
   }
 
   // --- 再送信クールダウンの開始（連続リトライの抑止） ---
@@ -303,7 +320,7 @@ class _IdentityVerificationScreenState
           TextButton(
             onPressed: () => Navigator.pop(context),
             child: const Text(
-              "OK",
+              'OK',
               style: TextStyle(fontWeight: FontWeight.bold),
             ),
           ),
@@ -314,96 +331,141 @@ class _IdentityVerificationScreenState
 
   void _showSnackBar(String message, Color bgColor) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        backgroundColor: bgColor,
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+          backgroundColor: bgColor,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.white,
-      appBar: AppBar(
-        title: const Text(
-          '年齢確認・本人確認',
-          style: TextStyle(color: Colors.black87, fontWeight: FontWeight.bold),
-        ),
-        centerTitle: true,
-        elevation: 0,
+    return PopScope(
+      // 💡 アップロード中に戻ると、提出が途中で止まってしまうため戻れないようにする
+      canPop: !_isLoading,
+      child: Scaffold(
         backgroundColor: Colors.white,
-        iconTheme: const IconThemeData(color: Colors.black87),
+        appBar: AppBar(
+          title: const Text(
+            '年齢確認・本人確認',
+            style: TextStyle(
+              color: Colors.black87,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          centerTitle: true,
+          elevation: 0,
+          backgroundColor: Colors.white,
+          iconTheme: const IconThemeData(color: Colors.black87),
+          automaticallyImplyLeading: !_isLoading,
+        ),
+        body: _buildBody(),
       ),
-      body: _isLoading
-          ? _buildLoadingView()
-          : SingleChildScrollView(
-              padding: const EdgeInsets.symmetric(
-                horizontal: 24.0,
-                vertical: 16.0,
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _buildStatusCard(),
-                  const SizedBox(height: 24),
+    );
+  }
 
-                  if (_verificationStatus == 'unsubmitted' ||
-                      _verificationStatus == 'rejected') ...[
-                    const Text(
-                      '年齢確認のお願い',
-                      style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.black87,
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    const Text(
-                      'frendyは、安心・安全な友達作りのコミュニティを維持するため、18歳未満の方の利用を制限しています。メッセージ送信の利用には、身分証による年齢確認が必須となります。',
-                      style: TextStyle(
-                        fontSize: 14,
-                        color: Colors.black54,
-                        height: 1.5,
-                      ),
-                    ),
-                    const SizedBox(height: 24),
+  Widget _buildBody() {
+    if (_isLoading) return _buildLoadingView();
 
-                    _buildGuidelineCard(),
-                    const SizedBox(height: 24),
+    if (_isStatusLoading) {
+      return const Center(
+        child: CircularProgressIndicator(color: AppColors.point),
+      );
+    }
 
-                    _buildImagePickerSection(),
-                    const SizedBox(height: 32),
+    if (_statusLoadFailed) return _buildLoadErrorView();
 
-                    _buildSubmitButton(),
-
-                    if (_cooldownSeconds > 0) ...[
-                      const SizedBox(height: 12),
-                      Text(
-                        '再送信まで ${_cooldownSeconds}秒お待ちください',
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(
-                          color: Colors.grey,
-                          fontSize: 12,
-                        ),
-                      ),
-                    ],
-                  ] else if (_verificationStatus == 'pending') ...[
-                    _buildPendingInfo(),
-                  ] else if (_verificationStatus == 'verified') ...[
-                    _buildVerifiedInfo(),
-                  ],
-                  const SizedBox(height: 40),
-                ],
+    return SingleChildScrollView(
+      padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 16.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _buildStatusCard(),
+          const SizedBox(height: 24),
+          if (_verificationStatus == 'pending')
+            _buildPendingInfo()
+          else if (_verificationStatus == 'verified')
+            _buildVerifiedInfo()
+          else ...[
+            // 未提出・否認（rejected）・想定外の値は、提出フォームを表示する
+            const Text(
+              '年齢確認のお願い',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                color: Colors.black87,
               ),
             ),
+            const SizedBox(height: 10),
+            const Text(
+              'frendyは、安心・安全な友達作りのコミュニティを維持するため、18歳未満の方の利用を制限しています。メッセージの送信には、身分証による年齢確認が必須となります。',
+              style: TextStyle(
+                fontSize: 14,
+                color: Colors.black54,
+                height: 1.5,
+              ),
+            ),
+            const SizedBox(height: 24),
+            _buildGuidelineCard(),
+            const SizedBox(height: 24),
+            _buildImagePickerSection(),
+            const SizedBox(height: 32),
+            _buildSubmitButton(),
+            if (_cooldownSeconds > 0) ...[
+              const SizedBox(height: 12),
+              Center(
+                child: Text(
+                  '再送信まで $_cooldownSeconds秒お待ちください',
+                  style: const TextStyle(color: Colors.grey, fontSize: 12),
+                ),
+              ),
+            ],
+            const SizedBox(height: 16),
+            const Text(
+              '提出いただいた画像は年齢確認のみに使用し、運営の審査担当者以外が見ることはありません。退会時には完全に削除されます。',
+              style: TextStyle(fontSize: 11, color: Colors.grey, height: 1.5),
+            ),
+          ],
+          const SizedBox(height: 40),
+        ],
+      ),
+    );
+  }
+
+  // --- 読み込み失敗時 ---
+  Widget _buildLoadErrorView() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.wifi_off_rounded, size: 48, color: Colors.grey),
+            const SizedBox(height: 16),
+            const Text(
+              '確認状況を読み込めませんでした。\n通信環境をご確認ください。',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.black54, height: 1.5),
+            ),
+            const SizedBox(height: 20),
+            OutlinedButton(
+              onPressed: _retryLoadStatus,
+              style: OutlinedButton.styleFrom(shape: const StadiumBorder()),
+              child: const Text('再読み込み'),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
   // --- アップロード中の進捗表示 ---
   Widget _buildLoadingView() {
+    final double? progress = _uploadProgress;
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -413,15 +475,13 @@ class _IdentityVerificationScreenState
             height: 56,
             child: CircularProgressIndicator(
               color: AppColors.point,
-              value: _uploadProgress != null && _uploadProgress! > 0
-                  ? _uploadProgress
-                  : null,
+              value: progress != null && progress > 0 ? progress : null,
             ),
           ),
           const SizedBox(height: 16),
           Text(
-            _uploadProgress != null
-                ? 'アップロード中... ${((_uploadProgress ?? 0) * 100).toStringAsFixed(0)}%'
+            progress != null
+                ? 'アップロード中... ${(progress * 100).toStringAsFixed(0)}%'
                 : '送信中...',
             style: const TextStyle(color: Colors.black54, fontSize: 13),
           ),
@@ -463,9 +523,12 @@ class _IdentityVerificationScreenState
       width: double.infinity,
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: statusColor.withOpacity(0.08),
+        color: statusColor.withValues(alpha: 0.08),
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: statusColor.withOpacity(0.3), width: 1.5),
+        border: Border.all(
+          color: statusColor.withValues(alpha: 0.3),
+          width: 1.5,
+        ),
       ),
       child: Column(
         children: [
@@ -474,12 +537,14 @@ class _IdentityVerificationScreenState
             children: [
               Icon(statusIcon, color: statusColor, size: 24),
               const SizedBox(width: 8),
-              Text(
-                statusText,
-                style: TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold,
-                  color: statusColor,
+              Flexible(
+                child: Text(
+                  statusText,
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: statusColor,
+                  ),
                 ),
               ),
             ],
@@ -523,7 +588,26 @@ class _IdentityVerificationScreenState
           ),
           SizedBox(height: 8),
           Text(
-            '・運転免許証 / 健康保険証\n・マイナンバーカード (表面のみ)\n・パスポート / 在留カード',
+            '・運転免許証\n'
+            '・マイナンバーカード（表面のみ）\n'
+            '・パスポート\n'
+            '・在留カード / 特別永住者証明書',
+            style: TextStyle(fontSize: 13, color: Colors.black54, height: 1.6),
+          ),
+          SizedBox(height: 12),
+          Text(
+            '📸 撮影のポイント',
+            style: TextStyle(
+              fontWeight: FontWeight.bold,
+              fontSize: 14,
+              color: Colors.black87,
+            ),
+          ),
+          SizedBox(height: 8),
+          Text(
+            '・生年月日・書類の名称・発行者がはっきり読めるように撮影してください\n'
+            '・光の反射や指で文字が隠れないようにしてください\n'
+            '・マイナンバーカードの裏面（個人番号）は撮影しないでください',
             style: TextStyle(fontSize: 13, color: Colors.black54, height: 1.6),
           ),
         ],
@@ -543,7 +627,7 @@ class _IdentityVerificationScreenState
                 shape: const RoundedRectangleBorder(
                   borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
                 ),
-                builder: (context) => SafeArea(
+                builder: (sheetContext) => SafeArea(
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -554,7 +638,7 @@ class _IdentityVerificationScreenState
                         ),
                         title: const Text('写真を撮影する'),
                         onTap: () {
-                          Navigator.pop(context);
+                          Navigator.pop(sheetContext);
                           _pickImage(ImageSource.camera);
                         },
                       ),
@@ -565,7 +649,7 @@ class _IdentityVerificationScreenState
                         ),
                         title: const Text('ライブラリから選択'),
                         onTap: () {
-                          Navigator.pop(context);
+                          Navigator.pop(sheetContext);
                           _pickImage(ImageSource.gallery);
                         },
                       ),
@@ -609,7 +693,11 @@ class _IdentityVerificationScreenState
                     )
                   : ClipRRect(
                       borderRadius: BorderRadius.circular(16),
-                      child: Image.file(_imageFile!, fit: BoxFit.cover),
+                      child: Image.file(
+                        _imageFile!,
+                        fit: BoxFit.contain,
+                        width: double.infinity,
+                      ),
                     ),
             ),
           ),
@@ -649,9 +737,7 @@ class _IdentityVerificationScreenState
           elevation: 0,
         ),
         child: Text(
-          _cooldownSeconds > 0
-              ? '再送信まで ${_cooldownSeconds}秒'
-              : '身分証を提出して年齢確認する',
+          _cooldownSeconds > 0 ? '再送信まで $_cooldownSeconds秒' : '身分証を提出して年齢確認する',
           style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
         ),
       ),
@@ -680,7 +766,8 @@ class _IdentityVerificationScreenState
           ),
           const SizedBox(height: 12),
           const Text(
-            'ただいま順番に提出された身分証の確認を行っております。\n通常、数分〜24時間以内に完了いたします。確認が完了すると、自動的に「承認済み」ステータスとなり、すべての機能がご利用可能になります。そのまましばらくお待ちください。',
+            '提出された身分証を順番に確認しております。\n'
+            '通常、数分〜24時間以内に完了いたします。確認が完了すると、この画面も自動で「承認済み」に切り替わり、すべての機能がご利用可能になります。',
             textAlign: TextAlign.center,
             style: TextStyle(fontSize: 13, color: Colors.black54, height: 1.6),
           ),
@@ -719,7 +806,9 @@ class _IdentityVerificationScreenState
           ),
           const SizedBox(height: 12),
           const Text(
-            'ご協力ありがとうございました！\n年齢確認が正常に完了しています。安心・安全なコミュニティ作りへのご協力に感謝いたします。\n\nfrendyの機能（マッチした友達とのメッセージやり取り）を心ゆくまでお楽しみください！',
+            'ご協力ありがとうございました！\n'
+            '安心・安全なコミュニティ作りへのご協力に感謝いたします。\n\n'
+            'frendyのすべての機能をお楽しみください！',
             textAlign: TextAlign.center,
             style: TextStyle(fontSize: 13, color: Colors.black54, height: 1.6),
           ),

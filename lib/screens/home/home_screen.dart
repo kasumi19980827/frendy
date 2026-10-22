@@ -390,8 +390,8 @@ class _HomeScreenState extends State<HomeScreen> {
     // 💡 手動の文字列結合ではなく、Uri.https + queryParametersで
     //    正しくURLエンコードする（不正なURLになるのを防ぐ）
     final Uri xUrl = Uri.https('x.com', '/intent/tweet', {
-      'text': 'frendyで繋がろう！',
-      'hashtags': 'frendy',
+      'text': 'Frendyで繋がろう！',
+      'hashtags': 'Frendy',
     });
 
     try {
@@ -592,7 +592,7 @@ class _HomeScreenState extends State<HomeScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'frendyの感想を教えてね！',
+                  'Frendyの感想を教えてね！',
                   style: TextStyle(
                     fontWeight: FontWeight.bold,
                     fontSize: 15,

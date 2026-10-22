@@ -10,8 +10,10 @@ import 'package:flutter/services.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 import 'package:matching_app/constants/app_colors.dart';
-import 'package:matching_app/main.dart'; // scaffoldMessengerKey を使うためにインポート
+import 'package:matching_app/main.dart'; // scaffoldMessengerKey・MyHomePage を使うためにインポート
 import 'package:matching_app/screens/auth/email_verification_pending_screen.dart';
+import 'package:matching_app/screens/settings/privacy_policy_screen.dart';
+import 'package:matching_app/screens/settings/terms_of_service_screen.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -27,6 +29,8 @@ class _LoginScreenState extends State<LoginScreen> {
 
   bool _isLoading = false;
   bool _isLoginMode = true; // true: ログイン, false: 新規登録
+  bool _agreedToTerms = false; // 💡 新規登録時の「18歳以上・利用規約・プライバシーポリシー」への同意
+  bool _obscurePassword = true;
 
   // 💡 GoogleSignInはボタンを押すたびに生成するのではなく、使い回す
   final GoogleSignIn _googleSignIn = GoogleSignIn(
@@ -35,12 +39,16 @@ class _LoginScreenState extends State<LoginScreen> {
   );
 
   // 💡 ブルートフォース対策：ログイン失敗が続いた場合のクールダウン管理
+  //    （本当の歯止めはFirebase側の制限。こちらは画面上で連打を防ぐためのもの）
   int _failedLoginAttempts = 0;
   int _cooldownSeconds = 0;
   Timer? _cooldownTimer;
   static const int _attemptsPerLockout = 5;
   static const int _baseCooldownSeconds = 30;
   static const int _maxCooldownSeconds = 300; // 上限5分
+
+  // 💡 新規登録時のパスワードの最低文字数
+  static const int _minPasswordLength = 8;
 
   // 💡 通信が固まってしまうのを防ぐタイムアウト
   static const Duration _authTimeout = Duration(seconds: 20);
@@ -54,7 +62,9 @@ class _LoginScreenState extends State<LoginScreen> {
     super.dispose();
   }
 
-  // --- 入力バリデーション ---
+  // ==========================================
+  // 入力チェック
+  // ==========================================
   bool _validateEmailPassword() {
     final email = _emailController.text.trim();
     final password = _passwordController.text.trim();
@@ -70,12 +80,19 @@ class _LoginScreenState extends State<LoginScreen> {
       return false;
     }
 
-    if (!_isLoginMode && password.length < 6) {
-      _showMessage('パスワードは6文字以上で入力してください。');
+    if (!_isLoginMode && password.length < _minPasswordLength) {
+      _showMessage('パスワードは$_minPasswordLength文字以上で入力してください。');
       return false;
     }
 
     return true;
+  }
+
+  // 💡 新規登録の前に、同意のチェックが入っているかを確認する
+  bool _checkAgreement() {
+    if (_isLoginMode || _agreedToTerms) return true;
+    _showMessage('18歳以上であることと、利用規約・プライバシーポリシーへの同意が必要です。');
+    return false;
   }
 
   // 💡 招待コードは英数字のみ・上限10文字に正規化してからFirestoreへ保存する
@@ -87,77 +104,143 @@ class _LoginScreenState extends State<LoginScreen> {
     return sanitized.length > 10 ? sanitized.substring(0, 10) : sanitized;
   }
 
-  // --- 📧 メール・パスワードでの認証処理 ---
+  // ==========================================
+  // ユーザー情報（Firestore）の作成
+  // ==========================================
+  //    メール登録・Google/Apple登録・「登録途中で失敗した人の修復」で共通して使う
+  Future<void> _createUserDoc({
+    required String uid,
+    required String email,
+    required bool agreed,
+    String? invitationCode,
+  }) async {
+    await FirebaseFirestore.instance
+        .collection('users')
+        .doc(uid)
+        .set({
+          'email': email,
+          'createdAt': FieldValue.serverTimestamp(),
+          'usedInvitationCode': invitationCode,
+          'friends': [],
+          // 💡 6文字だと5万人規模で他の人と同じコードになる確率が高いため、8文字にする
+          'myInvitationCode': uid.substring(0, 8).toUpperCase(),
+          'isProfileCompleted': false,
+          // 💡 いつ利用規約に同意したかを記録しておく（トラブル時の証拠になる）
+          if (agreed) 'agreedToTermsAt': FieldValue.serverTimestamp(),
+        })
+        .timeout(_authTimeout);
+  }
+
+  // ==========================================
+  // 📧 メール・パスワードでの認証処理
+  // ==========================================
   Future<void> _authAction() async {
-    // 💡 連打・多重リクエスト防止、クールダウン中は弾く
     if (_isLoading || _cooldownSeconds > 0) return;
     if (!_validateEmailPassword()) return;
+    if (!_checkAgreement()) return;
 
+    FocusScope.of(context).unfocus();
     setState(() => _isLoading = true);
+
+    // 💡 入力内容は最初に取り出しておく
+    //    （途中で画面が自動で差し替えられると、入力欄が破棄されて読めなくなるため）
+    final String email = _emailController.text.trim();
+    final String password = _passwordController.text.trim();
+    final String? invitationCode = _sanitizedInvitationCode();
+
     try {
       if (_isLoginMode) {
-        await FirebaseAuth.instance
-            .signInWithEmailAndPassword(
-              email: _emailController.text.trim(),
-              password: _passwordController.text.trim(),
-            )
+        final UserCredential credential = await FirebaseAuth.instance
+            .signInWithEmailAndPassword(email: email, password: password)
             .timeout(_authTimeout);
 
         // 💡 ログイン成功時は失敗カウントをリセットする
         _failedLoginAttempts = 0;
         _cooldownTimer?.cancel();
         if (mounted) setState(() => _cooldownSeconds = 0);
+
+        final User? user = credential.user;
+        if (user != null) await _completeEmailLogin(user, email);
       } else {
-        // 新規登録
-        final String? sanitizedCode = _sanitizedInvitationCode();
-        UserCredential userCredential = await FirebaseAuth.instance
-            .createUserWithEmailAndPassword(
-              email: _emailController.text.trim(),
-              password: _passwordController.text.trim(),
-            )
+        // --- 新規登録 ---
+        final UserCredential credential = await FirebaseAuth.instance
+            .createUserWithEmailAndPassword(email: email, password: password)
             .timeout(_authTimeout);
 
-        final String uid = userCredential.user?.uid ?? '';
+        final User? user = credential.user;
+        if (user == null) throw Exception('ユーザー作成に失敗しました');
 
-        // Firestoreにユーザー作成
-        await FirebaseFirestore.instance.collection('users').doc(uid).set({
-          'email': _emailController.text.trim(),
-          'createdAt': FieldValue.serverTimestamp(),
-          'usedInvitationCode': sanitizedCode,
-          'friends': [],
-          'myInvitationCode': uid.substring(0, 6).toUpperCase(),
-          'isProfileCompleted': false,
-        }, SetOptions(merge: true));
+        await _createUserDoc(
+          uid: user.uid,
+          email: email,
+          agreed: true,
+          invitationCode: invitationCode,
+        );
 
-        await userCredential.user?.sendEmailVerification();
-
-        if (mounted) {
-          scaffoldMessengerKey.currentState?.showSnackBar(
-            const SnackBar(content: Text('確認メールを送信しました。')),
-          );
-          Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (context) => const EmailVerificationPendingScreen(),
-            ),
-          );
+        // 💡 確認メールの送信に失敗しても、次の画面から再送できるので登録自体は続行する
+        try {
+          await user.sendEmailVerification().timeout(_authTimeout);
+        } catch (e) {
+          debugPrint('確認メール送信エラー: $e');
         }
+
+        _showMessage('確認メールを送信しました。');
+        _goTo(const EmailVerificationPendingScreen());
       }
     } on FirebaseAuthException catch (e) {
       _handleAuthError(e);
     } on TimeoutException {
-      if (mounted) {
-        _showMessage('通信がタイムアウトしました。もう一度お試しください。');
-      }
+      _showMessage('通信がタイムアウトしました。電波の良い場所でもう一度お試しください。');
+    } catch (e) {
+      // 💡 Firestoreの保存失敗など、想定外のエラーでも画面が固まらないようにする
+      debugPrint('Auth unexpected error: $e');
+      _showMessage('エラーが発生しました。もう一度お試しください。');
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
   }
 
+  // 💡 メールでログインした後の行き先を決める
+  //    （ログアウト後はこの画面が一番下に来るため、ログインしただけでは
+  //      画面が切り替わらない。行き先を明示的に指定する）
+  Future<void> _completeEmailLogin(User user, String typedEmail) async {
+    final doc = await FirebaseFirestore.instance
+        .collection('users')
+        .doc(user.uid)
+        .get()
+        .timeout(_authTimeout);
+
+    // 💡 登録の途中（ユーザー情報の保存前）で通信が切れた人を救済する
+    //    （画面が自動で差し替えられていても、ここは最後まで実行する）
+    if (!doc.exists) {
+      await _createUserDoc(
+        uid: user.uid,
+        email: user.email ?? typedEmail,
+        agreed: false,
+      );
+    }
+
+    if (user.emailVerified) {
+      _goTo(const MyHomePage());
+    } else {
+      _showMessage('メール認証が完了していません。届いたメールのリンクをタップしてください。');
+      _goTo(const EmailVerificationPendingScreen());
+    }
+  }
+
+  // 💡 これまでの画面履歴を消して移動する（戻るボタンでログイン画面に戻らないように）
+  void _goTo(Widget screen) {
+    if (!mounted) return;
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => screen),
+      (route) => false,
+    );
+  }
+
   // 💡 エラーコードごとの分岐。ログイン時は「ユーザー列挙」を防ぐため、
   //    存在有無に関わらず同じ汎用メッセージを返す
   void _handleAuthError(FirebaseAuthException e) {
-    debugPrint('Auth error: ${e.code} ${e.message}');
+    debugPrint('Auth error: ${e.code}');
 
     String message;
 
@@ -169,6 +252,9 @@ class _LoginScreenState extends State<LoginScreen> {
         case 'user-disabled':
           message = 'このアカウントは現在ご利用いただけません。';
           break;
+        case 'network-request-failed':
+          message = '通信エラーが発生しました。電波状況をご確認ください。';
+          break;
         default:
           // 💡 'user-not-found' と 'wrong-password' 等をあえて区別せず、
           //    第三者にアカウントの存在有無を推測されないようにする
@@ -178,7 +264,7 @@ class _LoginScreenState extends State<LoginScreen> {
     } else {
       switch (e.code) {
         case 'email-already-in-use':
-          message = 'このメールアドレスは既に登録されています。';
+          message = 'このメールアドレスは既に登録されています。ログイン画面からお試しください。';
           break;
         case 'weak-password':
           message = 'より強固なパスワードを設定してください。';
@@ -186,14 +272,15 @@ class _LoginScreenState extends State<LoginScreen> {
         case 'invalid-email':
           message = 'メールアドレスの形式が正しくありません。';
           break;
+        case 'network-request-failed':
+          message = '通信エラーが発生しました。電波状況をご確認ください。';
+          break;
         default:
           message = 'アカウント作成に失敗しました。もう一度お試しください。';
       }
     }
 
-    scaffoldMessengerKey.currentState?.showSnackBar(
-      SnackBar(content: Text(message)),
-    );
+    _showMessage(message);
   }
 
   // --- ブルートフォース対策：失敗回数に応じたクールダウン ---
@@ -231,60 +318,70 @@ class _LoginScreenState extends State<LoginScreen> {
     });
   }
 
-  void _showMessage(String message) {
-    scaffoldMessengerKey.currentState?.showSnackBar(
-      SnackBar(content: Text(message)),
-    );
+  void _showMessage(String message, {Color? backgroundColor}) {
+    scaffoldMessengerKey.currentState
+      ?..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(content: Text(message), backgroundColor: backgroundColor),
+      );
   }
 
-  // --- 🔴 Googleログイン処理 ---
+  // ==========================================
+  // 🔴 Googleログイン
+  // ==========================================
   Future<void> _onGoogleButtonTapped() async {
     if (_isLoading || _cooldownSeconds > 0) return;
+    if (!_checkAgreement()) return;
+    final String? invitationCode = _sanitizedInvitationCode();
     setState(() => _isLoading = true);
+
     try {
+      // 💡 前回選んだアカウントが自動で使われないよう、一度サインアウトしてから選ばせる
+      try {
+        await _googleSignIn.signOut();
+      } catch (_) {}
+
       final GoogleSignInAccount? googleUser = await _googleSignIn
           .signIn()
-          .timeout(_authTimeout);
-      if (googleUser == null) {
-        if (mounted) setState(() => _isLoading = false);
-        return;
-      }
+          .timeout(const Duration(minutes: 2)); // アカウント選択画面で迷う時間も考慮
+      if (googleUser == null) return; // ユーザーがキャンセルした
 
-      final GoogleSignInAuthentication googleAuth =
-          await googleUser.authentication;
+      final GoogleSignInAuthentication googleAuth = await googleUser
+          .authentication
+          .timeout(_authTimeout);
       final OAuthCredential credential = GoogleAuthProvider.credential(
         accessToken: googleAuth.accessToken,
         idToken: googleAuth.idToken,
       );
 
-      UserCredential userCredential = await FirebaseAuth.instance
+      final UserCredential userCredential = await FirebaseAuth.instance
           .signInWithCredential(credential)
           .timeout(_authTimeout);
-      await _handleFirebaseUserNavigation(userCredential);
+      await _handleSocialSignIn(userCredential, invitationCode);
+    } on FirebaseAuthException catch (e) {
+      _handleSocialAuthError(e, 'Google');
     } on TimeoutException {
-      if (mounted) {
-        setState(() => _isLoading = false);
-        _showMessage('通信がタイムアウトしました。もう一度お試しください。');
-      }
+      _showMessage('通信がタイムアウトしました。もう一度お試しください。');
     } catch (e) {
       debugPrint('Google login error: $e');
-      if (mounted) {
-        setState(() => _isLoading = false);
-        scaffoldMessengerKey.currentState?.hideCurrentSnackBar();
-        scaffoldMessengerKey.currentState?.showSnackBar(
-          const SnackBar(
-            content: Text('Googleログインに失敗しました。もう一度お試しください。'),
-            backgroundColor: Colors.redAccent,
-          ),
-        );
-      }
+      _showMessage(
+        'Googleログインに失敗しました。もう一度お試しください。',
+        backgroundColor: Colors.redAccent,
+      );
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
-  // --- 🍏 Appleログイン処理 ---
+  // ==========================================
+  // 🍏 Appleログイン
+  // ==========================================
   Future<void> _onAppleButtonTapped() async {
     if (_isLoading || _cooldownSeconds > 0) return;
+    if (!_checkAgreement()) return;
+    final String? invitationCode = _sanitizedInvitationCode();
     setState(() => _isLoading = true);
+
     try {
       // 💡 リプレイ攻撃対策：暗号学的に安全な乱数からnonceを生成し、
       //    そのSHA-256ハッシュをAppleに送る。Firebase側では元のnonceで検証する
@@ -305,34 +402,58 @@ class _LoginScreenState extends State<LoginScreen> {
         rawNonce: rawNonce,
       );
 
-      UserCredential userCredential = await FirebaseAuth.instance
+      final UserCredential userCredential = await FirebaseAuth.instance
           .signInWithCredential(credential)
           .timeout(_authTimeout);
-      await _handleFirebaseUserNavigation(userCredential);
-    } on TimeoutException {
-      if (mounted) {
-        setState(() => _isLoading = false);
-        _showMessage('通信がタイムアウトしました。もう一度お試しください。');
-      }
-    } catch (e) {
-      debugPrint('Apple login error: $e');
-      if (mounted) {
-        setState(() => _isLoading = false);
-        scaffoldMessengerKey.currentState?.hideCurrentSnackBar();
-        scaffoldMessengerKey.currentState?.showSnackBar(
-          const SnackBar(
-            content: Text('Appleログインに失敗しました。もう一度お試しください。'),
-            backgroundColor: Colors.redAccent,
-          ),
+      await _handleSocialSignIn(userCredential, invitationCode);
+    } on SignInWithAppleAuthorizationException catch (e) {
+      // 💡 ユーザーが自分でキャンセルした場合は、エラーを出さない
+      if (e.code != AuthorizationErrorCode.canceled) {
+        debugPrint('Apple authorization error: ${e.code}');
+        _showMessage(
+          'Appleログインに失敗しました。もう一度お試しください。',
+          backgroundColor: Colors.redAccent,
         );
       }
+    } on FirebaseAuthException catch (e) {
+      _handleSocialAuthError(e, 'Apple');
+    } on TimeoutException {
+      _showMessage('通信がタイムアウトしました。もう一度お試しください。');
+    } catch (e) {
+      debugPrint('Apple login error: $e');
+      _showMessage(
+        'Appleログインに失敗しました。もう一度お試しください。',
+        backgroundColor: Colors.redAccent,
+      );
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  void _handleSocialAuthError(FirebaseAuthException e, String provider) {
+    debugPrint('$provider auth error: ${e.code}');
+    switch (e.code) {
+      case 'account-exists-with-different-credential':
+        _showMessage('このメールアドレスは別の方法で登録されています。最初に登録した方法でログインしてください。');
+        break;
+      case 'user-disabled':
+        _showMessage('このアカウントは現在ご利用いただけません。');
+        break;
+      case 'network-request-failed':
+        _showMessage('通信エラーが発生しました。電波状況をご確認ください。');
+        break;
+      default:
+        _showMessage(
+          '$providerログインに失敗しました。もう一度お試しください。',
+          backgroundColor: Colors.redAccent,
+        );
     }
   }
 
   // 💡 暗号学的に安全な乱数文字列を生成する（Sign in with Appleのnonce用）
   String _generateNonce([int length = 32]) {
     const charset =
-        '0123456789ABCDEFGHIJKLMNOPQRSTUVXYZabcdefghijklmnopqrstuvwxyz-._';
+        '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-._';
     final Random random = Random.secure();
     return List.generate(
       length,
@@ -346,78 +467,77 @@ class _LoginScreenState extends State<LoginScreen> {
     return digest.toString();
   }
 
-  // --- 🚀 共通：ログイン・登録 制限ロジック ---
-  Future<void> _handleFirebaseUserNavigation(
+  // ==========================================
+  // 🚀 Google/Appleでログインした後の共通処理
+  // ==========================================
+  Future<void> _handleSocialSignIn(
     UserCredential userCredential,
+    String? invitationCode,
   ) async {
-    final String uid = userCredential.user?.uid ?? '';
-    final String email = userCredential.user?.email ?? '';
+    final User? user = userCredential.user;
+    if (user == null) throw Exception('ユーザー情報を取得できませんでした');
 
-    // Firestoreにドキュメントがあるか確認
+    // 💡 ここから先は「画面が閉じられていても」最後まで実行する。
+    //    アプリを初めて開いたときはmain.dartがログイン状態を見張っていて、
+    //    ログインした瞬間にこの画面を自動でホーム画面に差し替えてしまう。
+    //    以前はそこで処理が止まり、ユーザー情報が作られないままホームに入っていた
     final myDoc = await FirebaseFirestore.instance
         .collection('users')
-        .doc(uid)
-        .get();
+        .doc(user.uid)
+        .get()
+        .timeout(_authTimeout);
 
-    if (!mounted) return;
-
-    // 💡 1. 未登録ユーザーの場合（データが存在しない）
     if (!myDoc.exists) {
       if (_isLoginMode) {
-        // 【ログインモード時】：未登録なので弾く
-        await FirebaseAuth.instance.signOut();
-
-        if (mounted) {
-          setState(() => _isLoading = false);
+        // 【ログインモード】未登録なので弾く
+        // 💡 Google/Appleでのログインは、その瞬間にFirebase側のアカウントが作られてしまう。
+        //    今作られたばかりのアカウントなら削除して、使われないアカウントが溜まらないようにする
+        if (userCredential.additionalUserInfo?.isNewUser == true) {
+          try {
+            await user.delete();
+          } catch (e) {
+            debugPrint('未登録アカウントの削除エラー: $e');
+          }
         }
+        await FirebaseAuth.instance.signOut();
+        try {
+          await _googleSignIn.signOut();
+        } catch (_) {}
 
-        scaffoldMessengerKey.currentState?.hideCurrentSnackBar();
-        scaffoldMessengerKey.currentState?.showSnackBar(
-          const SnackBar(
-            content: Text(
-              'ログインできません。アカウントが登録されていません。',
-              style: TextStyle(
-                fontWeight: FontWeight.bold,
-                color: Colors.white,
-              ),
-            ),
-            backgroundColor: Colors.redAccent,
-            behavior: SnackBarBehavior.fixed,
-            duration: Duration(seconds: 4),
-          ),
+        _showMessage(
+          'アカウントが登録されていません。「新規アカウント作成はこちら」から登録してください。',
+          backgroundColor: Colors.redAccent,
         );
         return;
-      } else {
-        // 【新規登録モード時】：SNS経由で新規データをFirestoreに作成する
-        final String? sanitizedCode = _sanitizedInvitationCode();
-
-        // Firestoreにユーザー作成
-        await FirebaseFirestore.instance.collection('users').doc(uid).set({
-          'email': email,
-          'createdAt': FieldValue.serverTimestamp(),
-          'usedInvitationCode': sanitizedCode,
-          'friends': [],
-          'myInvitationCode': uid.substring(0, 6).toUpperCase(),
-          'isProfileCompleted': false,
-        }, SetOptions(merge: true));
-
-        scaffoldMessengerKey.currentState?.showSnackBar(
-          const SnackBar(content: Text('アカウントを作成しました。')),
-        );
       }
+
+      // 【新規登録モード】ユーザー情報を作成する
+      try {
+        await _createUserDoc(
+          uid: user.uid,
+          email: user.email ?? '',
+          agreed: true,
+          invitationCode: invitationCode,
+        );
+      } catch (e) {
+        // 💡 ユーザー情報の保存に失敗したら、ログインした状態のまま放置せずに
+        //    ログアウトして、最初からやり直してもらう（中途半端な状態でホームに入らないように）
+        await FirebaseAuth.instance.signOut();
+        try {
+          await _googleSignIn.signOut();
+        } catch (_) {}
+        rethrow;
+      }
+      _showMessage('アカウントを作成しました。');
     }
 
-    // 💡 2. 既存ユーザー、または今新規作成が完了したユーザーの場合：メイン画面へ
-    if (mounted) {
-      setState(() => _isLoading = false);
-
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (context) => const MyHomePage()),
-      );
-    }
+    // 💡 Google・Appleのアカウントはメール確認済みとして扱われるので、そのままホームへ
+    _goTo(const MyHomePage());
   }
 
+  // ==========================================
+  // 画面
+  // ==========================================
   @override
   Widget build(BuildContext context) {
     final bool isAuthDisabled = _isLoading || _cooldownSeconds > 0;
@@ -435,14 +555,15 @@ class _LoginScreenState extends State<LoginScreen> {
         centerTitle: true,
         backgroundColor: Colors.white,
         elevation: 0,
+        automaticallyImplyLeading: false,
       ),
-      body: LayoutBuilder(
-        builder: (context, constraints) {
-          return SingleChildScrollView(
-            keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-            child: ConstrainedBox(
-              constraints: BoxConstraints(minHeight: constraints.maxHeight),
-              child: IntrinsicHeight(
+      body: SafeArea(
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            return SingleChildScrollView(
+              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+              child: ConstrainedBox(
+                constraints: BoxConstraints(minHeight: constraints.maxHeight),
                 child: Padding(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 24.0,
@@ -461,19 +582,38 @@ class _LoginScreenState extends State<LoginScreen> {
                         keyboardType: TextInputType.emailAddress,
                         autocorrect: false,
                         enableSuggestions: false,
+                        autofillHints: const [AutofillHints.email],
                         textInputAction: TextInputAction.next,
                       ),
                       const SizedBox(height: 16),
                       TextField(
                         controller: _passwordController,
-                        decoration: const InputDecoration(
+                        decoration: InputDecoration(
                           labelText: 'パスワード',
-                          border: OutlineInputBorder(),
+                          helperText: _isLoginMode
+                              ? null
+                              : '$_minPasswordLength文字以上で入力してください',
+                          border: const OutlineInputBorder(),
+                          suffixIcon: IconButton(
+                            icon: Icon(
+                              _obscurePassword
+                                  ? Icons.visibility_off
+                                  : Icons.visibility,
+                            ),
+                            onPressed: () => setState(
+                              () => _obscurePassword = !_obscurePassword,
+                            ),
+                          ),
                         ),
-                        obscureText: true,
+                        obscureText: _obscurePassword,
                         // 💡 パスワードはキーボードの予測変換・自動補完の学習対象から除外する
                         autocorrect: false,
                         enableSuggestions: false,
+                        autofillHints: [
+                          _isLoginMode
+                              ? AutofillHints.password
+                              : AutofillHints.newPassword,
+                        ],
                         textInputAction: TextInputAction.done,
                         onSubmitted: (_) {
                           if (!isAuthDisabled) _authAction();
@@ -486,7 +626,7 @@ class _LoginScreenState extends State<LoginScreen> {
                           controller: _invitationCodeController,
                           decoration: const InputDecoration(
                             labelText: '友達の招待コード（お持ちの方）',
-                            hintText: '例: AB12CD',
+                            hintText: '例: AB12CD34',
                             border: OutlineInputBorder(),
                             prefixIcon: Icon(
                               Icons.card_giftcard,
@@ -501,18 +641,22 @@ class _LoginScreenState extends State<LoginScreen> {
                             ),
                           ],
                         ),
+                        _buildAgreementCheckbox(),
                       ],
 
-                      const SizedBox(height: 32),
+                      const SizedBox(height: 24),
 
                       if (_isLoading)
-                        const Center(child: CircularProgressIndicator())
+                        const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 24),
+                          child: Center(child: CircularProgressIndicator()),
+                        )
                       else ...[
                         if (_cooldownSeconds > 0) ...[
                           Padding(
                             padding: const EdgeInsets.only(bottom: 12),
                             child: Text(
-                              'ログイン試行が多いため、${_cooldownSeconds}秒後に再度お試しください。',
+                              'ログイン試行が多いため、$_cooldownSeconds秒後に再度お試しください。',
                               textAlign: TextAlign.center,
                               style: const TextStyle(
                                 color: Colors.redAccent,
@@ -548,6 +692,7 @@ class _LoginScreenState extends State<LoginScreen> {
                           onPressed: () => setState(() {
                             _isLoginMode = !_isLoginMode;
                             _invitationCodeController.clear();
+                            _agreedToTerms = false;
                           }),
                           child: Text(
                             _isLoginMode
@@ -626,52 +771,70 @@ class _LoginScreenState extends State<LoginScreen> {
                             ),
                           ),
                         ),
-
-                        // 💡 ✨ 【修正版：目立つ注意書きデザイン】
-                        if (!_isLoginMode) ...[
-                          const SizedBox(height: 24),
-                          Container(
-                            width: double.infinity,
-                            padding: const EdgeInsets.all(16.0),
-                            decoration: BoxDecoration(
-                              // 薄いグレーの背景でカード化
-                              color: Colors.grey[100],
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(color: Colors.grey[300]!),
-                            ),
-                            child: Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                // 💡 オレンジ色のインフォメーションアイコンで視線誘導
-                                const Icon(
-                                  Icons.info_outline,
-                                  color: Colors.orange,
-                                  size: 20,
-                                ),
-                                const SizedBox(width: 10),
-                                Expanded(
-                                  child: Text(
-                                    '招待コードをお持ちの方は、SNS登録（Google/Apple）を使わず、画面上部の「メールアドレス・パスワード」に入力してご登録ください。',
-                                    style: TextStyle(
-                                      color: Colors.grey[800], // より読みやすい濃さに
-                                      fontSize: 13,
-                                      fontWeight: FontWeight.w500, // 少し太めに
-                                      height: 1.4,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
                       ],
                     ],
                   ),
                 ),
               ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  // 💡 新規登録時の同意チェック（App Storeの審査でも、利用規約への同意が求められる）
+  Widget _buildAgreementCheckbox() {
+    const TextStyle normal = TextStyle(fontSize: 13, color: Colors.black87);
+    const TextStyle link = TextStyle(
+      fontSize: 13,
+      color: AppColors.point,
+      fontWeight: FontWeight.bold,
+      decoration: TextDecoration.underline,
+    );
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Checkbox(
+            value: _agreedToTerms,
+            activeColor: AppColors.point,
+            onChanged: (value) =>
+                setState(() => _agreedToTerms = value ?? false),
+          ),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.only(top: 12),
+              child: Wrap(
+                children: [
+                  const Text('18歳以上であり、', style: normal),
+                  GestureDetector(
+                    onTap: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => const TermsOfServiceScreen(),
+                      ),
+                    ),
+                    child: const Text('利用規約', style: link),
+                  ),
+                  const Text('と', style: normal),
+                  GestureDetector(
+                    onTap: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => const PrivacyPolicyScreen(),
+                      ),
+                    ),
+                    child: const Text('プライバシーポリシー', style: link),
+                  ),
+                  const Text('に同意します', style: normal),
+                ],
+              ),
             ),
-          );
-        },
+          ),
+        ],
       ),
     );
   }

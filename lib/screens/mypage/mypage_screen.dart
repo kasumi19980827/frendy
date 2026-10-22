@@ -378,7 +378,6 @@ class MypageScreen extends StatelessWidget {
       'friends',
       'likes',
       'likedBy',
-      'blocks',
       'blockedBy',
       'footprints',
     ];
