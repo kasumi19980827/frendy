@@ -315,7 +315,7 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
           style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
         ),
         content: const Text(
-          'トークを始めるには、まずニックネームを設定する必要があります。プロフィール編集画面から設定してください。',
+          'トークを始めるには、まずプロフィールを設定する必要があります。プロフィール編集画面から設定してください。',
           style: TextStyle(fontSize: 14, height: 1.5, color: Colors.black54),
         ),
         actions: [

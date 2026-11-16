@@ -1,10 +1,16 @@
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:matching_app/constants/app_colors.dart';
-import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter/services.dart';
 import 'package:in_app_review/in_app_review.dart';
+import 'package:matching_app/constants/app_colors.dart';
+
+const Duration _kNetworkTimeout = Duration(seconds: 15);
+const String _kFunctionsRegion = 'asia-northeast1';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -14,54 +20,51 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  // ⚠️【重要・提出前に必ず修正】App Store Connectで発行された実際のApp IDに
-  //    差し替えてください。プレースホルダーのままだと、レビュー画面が開けない
-  //    端末でタップした際に機能が正しく動作しません。
+  // ⚠️【提出前に必ず修正】App Store Connect の「App 情報」にある Apple ID（数字）に差し替える
   static const String _appStoreId = 'YOUR_APP_ID';
-
-  static const Duration _networkTimeout = Duration(seconds: 15);
 
   bool _isExpanded = false;
   bool _showForm = false;
   bool _isSubmittingOpinion = false;
 
-  // --- フォーム管理用 ---
   final TextEditingController _opinionController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
-  String myName = "ユーザー";
+
+  // 💡 Stream は initState で一度だけ作る。
+  //    build 内で作ると「もっと見る」やフォーム操作のたびに再購読して読み取りが増える
+  late final Stream<QuerySnapshot<Map<String, dynamic>>> _noticesStream;
+
+  // 招待コードは一度取得したら使い回す
+  Future<String>? _inviteCodeFuture;
 
   @override
   void initState() {
     super.initState();
-    _fetchMyName(); // 起動時にFirebaseから名前を取得
+    _noticesStream = FirebaseFirestore.instance
+        .collection('admin_messages')
+        .orderBy('createdAt', descending: true)
+        .limit(10)
+        .snapshots();
   }
 
   @override
   void dispose() {
-    _opinionController.dispose(); // メモリリーク防止
+    _opinionController.dispose();
     _scrollController.dispose();
     super.dispose();
   }
 
-  // --- 自分の名前を取得する関数 ---
-  Future<void> _fetchMyName() async {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) return;
-
-    try {
-      final doc = await FirebaseFirestore.instance
-          .collection('users')
-          .doc(user.uid)
-          .get()
-          .timeout(_networkTimeout);
-      if (doc.exists && mounted) {
-        setState(() {
-          myName = doc.data()?['name'] ?? "ユーザー";
-        });
-      }
-    } catch (e) {
-      debugPrint("名前取得エラー: $e");
-    }
+  void _toast(String message, {bool isError = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: isError ? Colors.redAccent : null,
+        ),
+      );
   }
 
   @override
@@ -82,7 +85,7 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // --- お知らせセクション ---
+            // --- お知らせ ---
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
@@ -115,7 +118,7 @@ class _HomeScreenState extends State<HomeScreen> {
             _buildNoticesSection(),
             const SizedBox(height: 5),
 
-            // --- 意見送信フォームセクション ---
+            // --- ご意見フォーム ---
             const Row(
               children: [
                 Icon(Icons.rate_review, color: AppColors.point),
@@ -127,15 +130,13 @@ class _HomeScreenState extends State<HomeScreen> {
               ],
             ),
             const SizedBox(height: 10),
-            _buildOpinionForm(context),
+            _buildOpinionForm(),
             const SizedBox(height: 18),
 
-            // --- バナー類 ---
-            _buildReviewBanner(context),
+            // --- バナー ---
+            _buildInviteBanner(),
             const SizedBox(height: 12),
-            _buildXShareBanner(context),
-            const SizedBox(height: 12),
-            _buildStoreReviewBanner(context),
+            _buildStoreReviewBanner(),
             const SizedBox(height: 10),
           ],
         ),
@@ -143,20 +144,15 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // --- お知らせセクション（Firestoreの本番データを表示） ---
-  //    💡 以前はアプリ内に固定文言をハードコードしていたが、
-  //       AdminMessagesScreenと同じ 'admin_messages' コレクションを参照するよう変更。
-  //       これにより「テスト用の固定コンテンツ」に見えるリスクをなくし、
-  //       お知らせ更新のたびにアプリを再申請する必要もなくなる
+  // ==========================================================================
+  // お知らせ
+  // ==========================================================================
   Widget _buildNoticesSection() {
-    return StreamBuilder<QuerySnapshot>(
-      stream: FirebaseFirestore.instance
-          .collection('admin_messages')
-          .orderBy('createdAt', descending: true)
-          .limit(10) // 💡 上限を設け、無制限に読み込まないようにする
-          .snapshots(),
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: _noticesStream,
       builder: (context, snapshot) {
         if (snapshot.hasError) {
+          debugPrint('お知らせ取得エラー: ${snapshot.error}');
           return const Padding(
             padding: EdgeInsets.symmetric(vertical: 12),
             child: Text(
@@ -165,14 +161,14 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           );
         }
-        if (snapshot.connectionState == ConnectionState.waiting) {
+        if (!snapshot.hasData) {
           return const Padding(
             padding: EdgeInsets.symmetric(vertical: 24),
             child: Center(child: CircularProgressIndicator()),
           );
         }
 
-        final docs = snapshot.data?.docs ?? [];
+        final docs = snapshot.data!.docs;
         if (docs.isEmpty) {
           return const Padding(
             padding: EdgeInsets.symmetric(vertical: 12),
@@ -186,18 +182,23 @@ class _HomeScreenState extends State<HomeScreen> {
           constraints: BoxConstraints(maxHeight: _isExpanded ? 350 : 180),
           child: ListView.builder(
             shrinkWrap: true,
+            padding: EdgeInsets.zero,
             physics: _isExpanded
                 ? const AlwaysScrollableScrollPhysics()
                 : const NeverScrollableScrollPhysics(),
             itemCount: displayDocs.length,
             itemBuilder: (context, index) {
-              final data = displayDocs[index].data() as Map<String, dynamic>;
-              final String title = data['title'] ?? 'お知らせ';
-              final String body = data['body'] ?? '';
-              final Timestamp? createdAt = data['createdAt'] as Timestamp?;
-              final String dateStr = createdAt != null
-                  ? '${createdAt.toDate().year}/${createdAt.toDate().month.toString().padLeft(2, '0')}/${createdAt.toDate().day.toString().padLeft(2, '0')}'
-                  : '';
+              final data = displayDocs[index].data();
+              final title = data['title'] is String
+                  ? data['title'] as String
+                  : 'お知らせ';
+              final body = data['body'] is String ? data['body'] as String : '';
+              final createdAt = data['createdAt'] is Timestamp
+                  ? (data['createdAt'] as Timestamp).toDate()
+                  : null;
+              final dateStr = createdAt == null
+                  ? ''
+                  : '${createdAt.year}/${createdAt.month.toString().padLeft(2, '0')}/${createdAt.day.toString().padLeft(2, '0')}';
               return _buildNoticeCard(dateStr, title, body);
             },
           ),
@@ -212,7 +213,7 @@ class _HomeScreenState extends State<HomeScreen> {
       margin: const EdgeInsets.only(bottom: 8),
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(10),
-        side: BorderSide(color: Colors.grey.withOpacity(0.2)),
+        side: BorderSide(color: Colors.grey.withValues(alpha: 0.2)),
       ),
       clipBehavior: Clip.antiAlias,
       child: ListTile(
@@ -234,12 +235,10 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // 💡 お知らせをタップした際に本文を表示する詳細ダイアログ
-  //    （AdminMessagesScreenと同じ見せ方に合わせている）
   void _showNoticeDetail(String title, String body, String date) {
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
+      builder: (dialogContext) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -271,7 +270,7 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context),
+            onPressed: () => Navigator.pop(dialogContext),
             child: const Text(
               '閉じる',
               style: TextStyle(fontWeight: FontWeight.bold),
@@ -282,388 +281,10 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildReviewBanner(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: [AppColors.point.withOpacity(0.8), AppColors.point],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        borderRadius: BorderRadius.circular(15),
-      ),
-      child: Row(
-        children: [
-          const Icon(Icons.stars, color: Colors.white, size: 40),
-          const SizedBox(width: 16),
-          const Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  '友達招待で1ヶ月無料体験！',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 15,
-                  ),
-                ),
-                Text(
-                  'あなたの友達も１ヶ月無料体験が楽しめます！',
-                  style: TextStyle(color: Colors.white, fontSize: 12),
-                ),
-              ],
-            ),
-          ),
-          ElevatedButton(
-            onPressed: _showInviteDetails,
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.white,
-              foregroundColor: AppColors.point,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(20),
-              ),
-            ),
-            child: const Text(
-              '詳細',
-              style: TextStyle(fontWeight: FontWeight.bold),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildXShareBanner(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.black,
-        borderRadius: BorderRadius.circular(15),
-      ),
-      child: Row(
-        children: [
-          const Icon(Icons.close, color: Colors.white, size: 30),
-          const SizedBox(width: 12),
-          const Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Xにシェアして特典をGET！',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 15,
-                  ),
-                ),
-                Text(
-                  '限定デザインのアバターを\nプレゼント！',
-                  style: TextStyle(color: Colors.white70, fontSize: 12),
-                ),
-              ],
-            ),
-          ),
-          ElevatedButton(
-            onPressed: () async => await _shareOnX(),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.white,
-              foregroundColor: Colors.black,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(20),
-              ),
-            ),
-            child: const Text(
-              '投稿する',
-              style: TextStyle(fontWeight: FontWeight.bold),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _shareOnX() async {
-    // 💡 手動の文字列結合ではなく、Uri.https + queryParametersで
-    //    正しくURLエンコードする（不正なURLになるのを防ぐ）
-    final Uri xUrl = Uri.https('x.com', '/intent/tweet', {
-      'text': 'Frendyで繋がろう！',
-      'hashtags': 'Frendy',
-    });
-
-    try {
-      final bool launched = await launchUrl(
-        xUrl,
-        mode: LaunchMode.externalApplication,
-      );
-      if (!launched) {
-        await launchUrl(xUrl, mode: LaunchMode.platformDefault);
-      }
-    } catch (e) {
-      debugPrint('X共有エラー: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('共有画面を開けませんでした。もう一度お試しください。')),
-        );
-      }
-    }
-  }
-
-  void _showInviteDetails() {
-    final user = FirebaseAuth.instance.currentUser;
-    final String inviteCode =
-        user?.uid.substring(0, 6).toUpperCase() ?? "UNKNOWN";
-
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      builder: (context) {
-        return Container(
-          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
-          decoration: const BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.only(
-              topLeft: Radius.circular(30),
-              topRight: Radius.circular(30),
-            ),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 40,
-                height: 4,
-                margin: const EdgeInsets.only(bottom: 20),
-                decoration: BoxDecoration(
-                  color: Colors.grey[300],
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-              const Icon(Icons.card_giftcard, color: AppColors.point, size: 48),
-              const SizedBox(height: 16),
-              const Text(
-                '友達招待特典',
-                style: TextStyle(
-                  fontSize: 22,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.black87,
-                ),
-              ),
-              const SizedBox(height: 24),
-              Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: AppColors.point.withOpacity(0.05),
-                  borderRadius: BorderRadius.circular(15),
-                ),
-                child: const Column(
-                  children: [
-                    Text(
-                      '🎁 1ヶ月プレミアム体験プレゼント',
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        color: AppColors.point,
-                        fontSize: 15,
-                      ),
-                    ),
-                    SizedBox(height: 8),
-                    Text(
-                      'あなたと友達のどちらも、全ての機能が使える「プレミアムプラン」を1ヶ月間無料で楽しめます。',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        fontSize: 13,
-                        color: Colors.black54,
-                        height: 1.5,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 24),
-              const Text(
-                '招待コードをシェア',
-                style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.grey,
-                ),
-              ),
-              const SizedBox(height: 12),
-              InkWell(
-                onTap: () {
-                  Clipboard.setData(ClipboardData(text: inviteCode));
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: const Text('招待コードをコピーしました！'),
-                      behavior: SnackBarBehavior.floating,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      backgroundColor: AppColors.point,
-                    ),
-                  );
-                },
-                borderRadius: BorderRadius.circular(15),
-                child: Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.symmetric(vertical: 20),
-                  decoration: BoxDecoration(
-                    border: Border.all(
-                      color: AppColors.point.withOpacity(0.3),
-                      width: 2,
-                    ),
-                    borderRadius: BorderRadius.circular(15),
-                  ),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Text(
-                        inviteCode,
-                        style: const TextStyle(
-                          fontSize: 32,
-                          fontWeight: FontWeight.bold,
-                          letterSpacing: 8,
-                          color: AppColors.point,
-                        ),
-                      ),
-                      const Icon(
-                        Icons.copy_rounded,
-                        color: AppColors.point,
-                        size: 20,
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(height: 32),
-              SizedBox(
-                width: double.infinity,
-                height: 54,
-                child: ElevatedButton(
-                  onPressed: () => Navigator.pop(context),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.grey[100],
-                    foregroundColor: Colors.black54,
-                    elevation: 0,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(15),
-                    ),
-                  ),
-                  child: const Text(
-                    '閉じる',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                ),
-              ),
-              SizedBox(height: MediaQuery.of(context).padding.bottom),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildStoreReviewBanner(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: [
-            AppColors.pink.withOpacity(0.1),
-            AppColors.pink.withOpacity(0.05),
-          ],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        borderRadius: BorderRadius.circular(15),
-        border: Border.all(color: AppColors.pink.withOpacity(0.2), width: 1.5),
-      ),
-      child: Row(
-        children: [
-          const Icon(Icons.favorite_rounded, color: AppColors.pink, size: 36),
-          const SizedBox(width: 16),
-          const Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Frendyの感想を教えてね！',
-                  style: TextStyle(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 15,
-                    color: Colors.black87,
-                  ),
-                ),
-                Text(
-                  'レビューで応援いただけると、\n開発の励みになります！',
-                  style: TextStyle(
-                    color: Colors.black54,
-                    fontSize: 12,
-                    height: 1.4,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          ElevatedButton(
-            onPressed: () => _handleStoreReviewTap(context),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.pink,
-              foregroundColor: Colors.white,
-              elevation: 0,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(20),
-              ),
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-            ),
-            child: const Text(
-              '書く',
-              style: TextStyle(fontWeight: FontWeight.bold),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // 💡 例外処理を追加し、プレースホルダーのApp IDのまま誤って
-  //    ストア遷移を試みて機能が壊れることのないようにガードする
-  Future<void> _handleStoreReviewTap(BuildContext context) async {
-    try {
-      final InAppReview inAppReview = InAppReview.instance;
-      if (await inAppReview.isAvailable()) {
-        await inAppReview.requestReview();
-        return;
-      }
-
-      if (_appStoreId == 'YOUR_APP_ID') {
-        debugPrint('警告: App Store IDが未設定のままです。_appStoreIdを実際の値に差し替えてください。');
-        if (mounted) {
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(const SnackBar(content: Text('現在準備中です。しばらくお待ちください。')));
-        }
-        return;
-      }
-
-      await inAppReview.openStoreListing(appStoreId: _appStoreId);
-    } catch (e) {
-      debugPrint('レビュー画面の表示エラー: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('レビュー画面を開けませんでした。もう一度お試しください。')),
-        );
-      }
-    }
-  }
-
-  // --- 意見送信フォーム ---
-  Widget _buildOpinionForm(BuildContext context) {
+  // ==========================================================================
+  // ご意見フォーム
+  // ==========================================================================
+  Widget _buildOpinionForm() {
     return AnimatedSwitcher(
       duration: const Duration(milliseconds: 300),
       child: !_showForm
@@ -695,13 +316,13 @@ class _HomeScreenState extends State<HomeScreen> {
                 borderRadius: BorderRadius.circular(12),
               ),
               child: Padding(
-                padding: const EdgeInsets.all(16.0),
+                padding: const EdgeInsets.all(16),
                 child: Column(
                   children: [
                     TextField(
                       controller: _opinionController,
                       maxLines: 3,
-                      maxLength: 500, // 💡 スパム・Firestoreドキュメント肥大化対策
+                      maxLength: 500,
                       autofocus: true,
                       enabled: !_isSubmittingOpinion,
                       decoration: const InputDecoration(
@@ -758,46 +379,431 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // 💡 意見送信処理を独立させ、二重送信防止・エラーフィードバックを追加
+  // 💡 ご意見と「最後に送った時刻」を同時に書き込み、
+  //    ルール側で「前回から60秒以上空いているか」を確認して連投（スパム）を防ぐ。
+  //    名前は端末から送らず、運営側で userId から確認する（なりすまし防止）
   Future<void> _submitOpinion() async {
-    final String text = _opinionController.text.trim();
+    final text = _opinionController.text.trim();
+    final uid = FirebaseAuth.instance.currentUser?.uid;
     if (text.isEmpty || _isSubmittingOpinion) return;
+    if (uid == null) {
+      _toast('ログインが必要です', isError: true);
+      return;
+    }
 
     setState(() => _isSubmittingOpinion = true);
 
     try {
-      await FirebaseFirestore.instance
-          .collection('opinions')
-          .add({
-            'userId': FirebaseAuth.instance.currentUser?.uid,
-            'userName': myName,
-            'text': text,
-            'createdAt': FieldValue.serverTimestamp(),
-          })
-          .timeout(_networkTimeout);
+      final db = FirebaseFirestore.instance;
+      final batch = db.batch();
+      batch.set(db.collection('opinions').doc(), {
+        'userId': uid,
+        'text': text,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+      batch.set(db.collection('rate_limits').doc(uid), {
+        'lastOpinionAt': FieldValue.serverTimestamp(),
+      });
+      await batch.commit().timeout(_kNetworkTimeout);
 
       if (!mounted) return;
-
       _opinionController.clear();
-      setState(() {
-        _showForm = false;
-        _isSubmittingOpinion = false;
-      });
+      setState(() => _showForm = false);
+      _toast('ご意見ありがとうございます！');
+    } on FirebaseException catch (e) {
+      debugPrint('意見送信エラー: $e');
+      _toast(
+        e.code == 'permission-denied'
+            ? '続けて送信できません。1分ほど待ってからお試しください。'
+            : '送信に失敗しました。もう一度お試しください。',
+        isError: true,
+      );
+    } on TimeoutException {
+      _toast('通信が不安定です。接続が回復すると送信されます。');
+    } catch (e) {
+      debugPrint('意見送信エラー: $e');
+      _toast('送信に失敗しました。もう一度お試しください。', isError: true);
+    } finally {
+      if (mounted) setState(() => _isSubmittingOpinion = false);
+    }
+  }
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('ご意見ありがとうございます！'),
-          backgroundColor: Color.fromARGB(255, 2, 2, 2),
+  // ==========================================================================
+  // 友達招待
+  // ==========================================================================
+  Widget _buildInviteBanner() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [AppColors.point.withValues(alpha: 0.8), AppColors.point],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
         ),
+        borderRadius: BorderRadius.circular(15),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.stars, color: Colors.white, size: 40),
+          const SizedBox(width: 16),
+          const Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '友達招待で1ヶ月無料体験！',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 15,
+                  ),
+                ),
+                Text(
+                  'あなたの友達も１ヶ月無料体験が楽しめます！',
+                  style: TextStyle(color: Colors.white, fontSize: 12),
+                ),
+              ],
+            ),
+          ),
+          ElevatedButton(
+            onPressed: _showInviteDetails,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.white,
+              foregroundColor: AppColors.point,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20),
+              ),
+            ),
+            child: const Text(
+              '詳細',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // 💡 招待コードはサーバーで重複なく発行する。
+  //    以前は「ユーザーIDの先頭6文字」を使っていたため、
+  //    ① 5万人規模だと他人とコードが重なる可能性が高い
+  //    ② ユーザーIDの一部が外部に漏れる
+  //    という問題があった
+  Future<String> _loadInviteCode() async {
+    final res = await FirebaseFunctions.instanceFor(region: _kFunctionsRegion)
+        .httpsCallable(
+          'getInviteCode',
+          options: HttpsCallableOptions(timeout: _kNetworkTimeout),
+        )
+        .call();
+    final data = Map<String, dynamic>.from(res.data as Map);
+    final code = data['code'];
+    if (code is! String || code.isEmpty) throw StateError('招待コードが空です');
+    return code;
+  }
+
+  void _showInviteDetails() {
+    _inviteCodeFuture ??= _loadInviteCode();
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (sheetContext) => _InviteSheet(
+        codeFuture: _inviteCodeFuture!,
+        onRetry: () {
+          Navigator.pop(sheetContext);
+          setState(() => _inviteCodeFuture = null);
+          _showInviteDetails();
+        },
+      ),
+    );
+  }
+
+  // ==========================================================================
+  // ストアレビュー
+  // ==========================================================================
+  Widget _buildStoreReviewBanner() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [
+            AppColors.pink.withValues(alpha: 0.1),
+            AppColors.pink.withValues(alpha: 0.05),
+          ],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(15),
+        border: Border.all(
+          color: AppColors.pink.withValues(alpha: 0.2),
+          width: 1.5,
+        ),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.favorite_rounded, color: AppColors.pink, size: 36),
+          const SizedBox(width: 16),
+          const Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Frendyの感想を教えてね！',
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 15,
+                    color: Colors.black87,
+                  ),
+                ),
+                Text(
+                  'レビューで応援いただけると、\n開発の励みになります！',
+                  style: TextStyle(
+                    color: Colors.black54,
+                    fontSize: 12,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          ElevatedButton(
+            onPressed: _handleStoreReviewTap,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.pink,
+              foregroundColor: Colors.white,
+              elevation: 0,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20),
+              ),
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+            ),
+            child: const Text(
+              '書く',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // 💡 ボタンから開く場合は requestReview ではなく openStoreListing を使う。
+  //    requestReview は表示回数に上限（iOS は年3回）があり、
+  //    押しても何も起きないことが多いため「ボタンが壊れている」ように見えてしまう
+  Future<void> _handleStoreReviewTap() async {
+    final bool isIOS = defaultTargetPlatform == TargetPlatform.iOS;
+    if (isIOS && _appStoreId == 'YOUR_APP_ID') {
+      debugPrint('警告: _appStoreId が未設定です');
+      _toast('現在準備中です。しばらくお待ちください。');
+      return;
+    }
+
+    try {
+      await InAppReview.instance.openStoreListing(
+        appStoreId: isIOS ? _appStoreId : null,
       );
     } catch (e) {
-      debugPrint("意見送信エラー: $e");
-      if (mounted) {
-        setState(() => _isSubmittingOpinion = false);
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('送信に失敗しました。もう一度お試しください。')));
-      }
+      debugPrint('レビュー画面の表示エラー: $e');
+      _toast('レビュー画面を開けませんでした。もう一度お試しください。', isError: true);
     }
+  }
+}
+
+// ----------------------------------------------------------------------------
+// 招待コードのボトムシート
+// ----------------------------------------------------------------------------
+class _InviteSheet extends StatefulWidget {
+  const _InviteSheet({required this.codeFuture, required this.onRetry});
+
+  final Future<String> codeFuture;
+  final VoidCallback onRetry;
+
+  @override
+  State<_InviteSheet> createState() => _InviteSheetState();
+}
+
+class _InviteSheetState extends State<_InviteSheet> {
+  bool _copied = false;
+
+  Future<void> _copy(String code) async {
+    await Clipboard.setData(ClipboardData(text: code));
+    if (!mounted) return;
+    // 💡 SnackBar はシートの裏に隠れて見えないため、シート内の表示で知らせる
+    setState(() => _copied = true);
+    Future.delayed(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _copied = false);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.only(
+          topLeft: Radius.circular(30),
+          topRight: Radius.circular(30),
+        ),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 40,
+            height: 4,
+            margin: const EdgeInsets.only(bottom: 20),
+            decoration: BoxDecoration(
+              color: Colors.grey[300],
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const Icon(Icons.card_giftcard, color: AppColors.point, size: 48),
+          const SizedBox(height: 16),
+          const Text(
+            '友達招待特典',
+            style: TextStyle(
+              fontSize: 22,
+              fontWeight: FontWeight.bold,
+              color: Colors.black87,
+            ),
+          ),
+          const SizedBox(height: 24),
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: AppColors.point.withValues(alpha: 0.05),
+              borderRadius: BorderRadius.circular(15),
+            ),
+            child: const Column(
+              children: [
+                Text(
+                  '🎁 1ヶ月プレミアム体験プレゼント',
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    color: AppColors.point,
+                    fontSize: 15,
+                  ),
+                ),
+                SizedBox(height: 8),
+                Text(
+                  'あなたと友達のどちらも、全ての機能が使える「プレミアムプラン」を1ヶ月間無料で楽しめます。',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: Colors.black54,
+                    height: 1.5,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 24),
+          Text(
+            _copied ? 'コピーしました！' : '招待コードをタップしてコピー',
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.bold,
+              color: _copied ? AppColors.point : Colors.grey,
+            ),
+          ),
+          const SizedBox(height: 12),
+          FutureBuilder<String>(
+            future: widget.codeFuture,
+            builder: (context, snap) {
+              if (snap.hasError) {
+                debugPrint('招待コード取得エラー: ${snap.error}');
+                return Column(
+                  children: [
+                    const Text(
+                      '招待コードを取得できませんでした',
+                      style: TextStyle(color: Colors.grey),
+                    ),
+                    TextButton(
+                      onPressed: widget.onRetry,
+                      child: const Text('再読み込み'),
+                    ),
+                  ],
+                );
+              }
+              if (!snap.hasData) {
+                return const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 24),
+                  child: CircularProgressIndicator(),
+                );
+              }
+
+              final code = snap.data!;
+              return InkWell(
+                onTap: () => _copy(code),
+                borderRadius: BorderRadius.circular(15),
+                child: Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(
+                    vertical: 20,
+                    horizontal: 12,
+                  ),
+                  decoration: BoxDecoration(
+                    border: Border.all(
+                      color: AppColors.point.withValues(alpha: 0.3),
+                      width: 2,
+                    ),
+                    borderRadius: BorderRadius.circular(15),
+                  ),
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          code,
+                          style: const TextStyle(
+                            fontSize: 28,
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: 4,
+                            color: AppColors.point,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Icon(
+                          _copied ? Icons.check_rounded : Icons.copy_rounded,
+                          color: AppColors.point,
+                          size: 20,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+          const SizedBox(height: 32),
+          SizedBox(
+            width: double.infinity,
+            height: 54,
+            child: ElevatedButton(
+              onPressed: () => Navigator.pop(context),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.grey[100],
+                foregroundColor: Colors.black54,
+                elevation: 0,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(15),
+                ),
+              ),
+              child: const Text(
+                '閉じる',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+            ),
+          ),
+          SizedBox(height: MediaQuery.of(context).padding.bottom),
+        ],
+      ),
+    );
   }
 }
