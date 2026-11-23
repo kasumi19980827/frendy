@@ -1,11 +1,107 @@
-import 'package:flutter/material.dart';
+import 'dart:async';
+
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:cached_network_image/cached_network_image.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:matching_app/constants/app_colors.dart';
 import 'package:matching_app/constants/app_tags.dart';
 import 'package:matching_app/screens/profile/profile_detail_screen.dart';
 
+// ============================================================================
+// さがす（ユーザー検索）
+//
+// 💡 5万人規模を想定した作り
+//  以前は users コレクションを「全員分」リアルタイムで読み込んでいたため、
+//  画面を開くたびに全ユーザー数ぶんの読み取り料金がかかり、
+//  誰かがプロフィールを変えるたびに全員の画面に通知が飛んでいた。
+//  → 最近ログインした順に30人ずつ読み込む方式に変更。
+//
+//  ・性別・タグ（1つ目）はサーバー側で絞り込む（インデックスが必要）
+//  ・年齢・キーワード・2つ目以降のタグは、読み込んだ分の中で絞り込む
+//  ・ID検索（プロフィールに表示される英数字のID）はサーバー側で前方一致検索
+//  ・ブロック関係（自分がブロック・相手からブロック）は一覧から除外
+// ============================================================================
+
+const Duration _kNetworkTimeout = Duration(seconds: 20);
+const int _kPageSize = 30; // 1回の読み込み件数
+const int _kMinResultsPerLoad = 12; // 1回の「続きを読む」で最低これだけ表示したい
+const int _kMaxScanPerLoad = 150; // 絞り込みで外れが多くても、1回で読むのはここまで
+const int _kRecommendPool = 150; // おすすめを計算する対象（最近ログインした人から）
+const int _kMaxRelations = 1000; // ブロック一覧を読む上限
+const Duration _kLastLoginUpdateInterval = Duration(hours: 6);
+
+final RegExp _kIdPattern = RegExp(r'^[A-Za-z0-9]{6,28}$');
+// 前方一致検索の上限に使う文字（目に見えない特殊文字なので、コードで作る）
+final String _kIdUpperBound = String.fromCharCode(0xf8ff);
+
+FirebaseFirestore get _db => FirebaseFirestore.instance;
+
+// キーワード同士を区切る文字（読点・カンマ）
+final RegExp _kWordSeparator = RegExp(r'[、,，]+');
+// キーワードの前後に付いた記号を取り除く
+const String _kEdgeSymbol = r'[。．/・\s　!！?？()（）「」『』【】:：;；\-－~〜…]+';
+final RegExp _kEdgeSymbolRe = RegExp('^$_kEdgeSymbol|$_kEdgeSymbol\$');
+
+const List<String> _kIgnoreWords = [
+  'なし',
+  '未設定',
+  '特になし',
+  '未入力',
+  '設定なし',
+  'ありません',
+  '特になしです',
+];
+const List<String> _kHobbyFields = ['hobby', 'recentInterest'];
+
+// ----------------------------------------------------------------------------
+// 安全にデータを取り出すヘルパー（型が違ってもクラッシュしない）
+// ----------------------------------------------------------------------------
+String _str(Map<String, dynamic> d, String key, [String fallback = '']) {
+  final v = d[key];
+  if (v is String && v.trim().isNotEmpty) return v.trim();
+  if (v is num) return v.toString();
+  return fallback;
+}
+
+int _ageOf(Map<String, dynamic> d) {
+  final v = d['age'];
+  if (v is num) return v.toInt();
+  if (v is String) return int.tryParse(v.trim()) ?? 0;
+  return 0;
+}
+
+List<String> _stringList(dynamic v) =>
+    v is List ? v.whereType<String>().toList() : const [];
+
+String? _firstImageUrl(Map<String, dynamic> d) {
+  final urls = d['imageUrls'];
+  if (urls is! List || urls.isEmpty) return null;
+  final first = urls.first;
+  return first is String && first.startsWith('https://') ? first : null;
+}
+
+List<String> _splitToKeywords(String text) {
+  return text
+      .split(_kWordSeparator)
+      .map((s) => s.replaceAll(_kEdgeSymbolRe, '').trim().toLowerCase())
+      .where((s) => s.length >= 2 && !_kIgnoreWords.contains(s))
+      .toList();
+}
+
+String _sanitizeQuery(String text) =>
+    text.trim().toLowerCase().replaceAll(_kEdgeSymbolRe, '');
+
+class _Candidate {
+  const _Candidate(this.id, this.data);
+  final String id;
+  final Map<String, dynamic> data;
+}
+
+// ============================================================================
+// 画面
+// ============================================================================
 class SearchScreen extends StatefulWidget {
   const SearchScreen({super.key});
 
@@ -14,38 +110,416 @@ class SearchScreen extends StatefulWidget {
 }
 
 class _SearchScreenState extends State<SearchScreen> {
-  bool _isTwoColumn = true;
-  // 検索文字を管理する変数
-  String _searchKeyword = "";
+  final ScrollController _gridController = ScrollController();
+  final ScrollController _listController = ScrollController();
+  Timer? _debounce;
 
-  // フィルター用の状態
+  late final String _myId;
+  bool _isTwoColumn = true;
+
+  // 検索条件
+  String _searchKeyword = '';
   int _minAge = 18;
   int _maxAge = 50;
   String _selectedGender = 'すべて';
-  List<String> _selectedTags = [];
-
-  // タブ選択の状態を管理する変数（デフォルト：おすすめ）
-  String _selectedTab =
-      'recommend'; // 'all' (ユーザー), 'recommend' (おすすめ), 'popular' (人気)
+  final List<String> _selectedTags = [];
+  String _selectedTab = 'recommend'; // 'all'（ユーザー）/ 'recommend'（おすすめ）
   bool _isManualSelection = false;
 
-  // 💡 画像URLを安全に取り出すヘルパー。
-  //    データが壊れていて先頭要素がnullや文字列以外だった場合でも
-  //    実行時エラーにならないようにする
-  String? _firstImageUrl(Map<String, dynamic> data) {
-    final dynamic urls = data['imageUrls'];
-    if (urls is! List || urls.isEmpty) return null;
-    final dynamic first = urls.first;
-    return first is String && first.isNotEmpty ? first : null;
+  // 自分の情報
+  bool _initializing = true;
+  bool _initFailed = false;
+  final Set<String> _excludedIds = {}; // 自分・ブロック関係のユーザー
+  List<String> _myHobbyWords = [];
+
+  // 検索結果
+  final List<_Candidate> _results = [];
+  final Set<String> _resultIds = {};
+  DocumentSnapshot<Map<String, dynamic>>? _cursor;
+  // 💡 読み込みの段階
+  //   0：最終ログインが新しい順（lastLoginTime がある人）
+  //   1：それ以外の人（lastLoginTime がまだない人）を ID 順に
+  int _phase = 0;
+  bool _hasMore = true;
+  bool _loading = false;
+  bool _loadFailed = false;
+  int _requestId = 0; // 条件を変えたとき、古い読み込み結果を捨てるための番号
+
+  @override
+  void initState() {
+    super.initState();
+    _myId = FirebaseAuth.instance.currentUser?.uid ?? '';
+    _gridController.addListener(() => _onScroll(_gridController));
+    _listController.addListener(() => _onScroll(_listController));
+    if (_myId.isNotEmpty) _init();
   }
 
   @override
-  Widget build(BuildContext context) {
-    final String? myId = FirebaseAuth.instance.currentUser?.uid;
+  void dispose() {
+    _debounce?.cancel();
+    _gridController.dispose();
+    _listController.dispose();
+    super.dispose();
+  }
 
-    // 💡 未ログイン状態で.doc('')を呼ぶとFirestoreが不正な参照として
-    //    例外を投げてしまうため、ログインしていない場合はここで安全に止める
-    if (myId == null || myId.isEmpty) {
+  // ==========================================================================
+  // 最初の準備：自分のプロフィールとブロック関係を1回だけ読む
+  // ==========================================================================
+  Future<void> _init() async {
+    setState(() {
+      _initializing = true;
+      _initFailed = false;
+    });
+
+    try {
+      final myRef = _db.collection('users').doc(_myId);
+      final results = await Future.wait([
+        myRef.get(),
+        myRef.collection('blocks').limit(_kMaxRelations).get(),
+        myRef.collection('blockedBy').limit(_kMaxRelations).get(),
+      ]).timeout(_kNetworkTimeout);
+
+      final mySnap = results[0] as DocumentSnapshot<Map<String, dynamic>>;
+      final myBlocks = results[1] as QuerySnapshot<Map<String, dynamic>>;
+      final myBlockedBy = results[2] as QuerySnapshot<Map<String, dynamic>>;
+      final myData = mySnap.data() ?? {};
+
+      _excludedIds
+        ..clear()
+        ..add(_myId)
+        ..addAll(myBlocks.docs.map((d) => d.id))
+        ..addAll(myBlockedBy.docs.map((d) => d.id))
+        // ⚠️ 移行用：古い方式（配列）のブロックも除外する
+        ..addAll(_stringList(myData['blocks']))
+        ..addAll(_stringList(myData['blockedBy']));
+
+      final words = <String>[];
+      for (final field in _kHobbyFields) {
+        final v = myData[field];
+        if (v is String) {
+          words.addAll(_splitToKeywords(v));
+        } else if (v is List) {
+          for (final item in v.whereType<String>()) {
+            words.addAll(_splitToKeywords(item));
+          }
+        }
+      }
+      _myHobbyWords = words.toSet().toList();
+
+      _touchLastLogin(myData['lastLoginTime']);
+
+      if (!mounted) return;
+      setState(() => _initializing = false);
+      _reload();
+    } catch (e) {
+      debugPrint('検索の準備エラー: $e');
+      if (mounted) {
+        setState(() {
+          _initializing = false;
+          _initFailed = true;
+        });
+      }
+    }
+  }
+
+  // 💡 「最近ログインした順」に並べるため、自分の最終ログイン時刻を更新する。
+  //    書き込みを減らすため、前回から6時間以上たっているときだけ。
+  void _touchLastLogin(dynamic last) {
+    final now = DateTime.now();
+    if (last is Timestamp &&
+        now.difference(last.toDate()) < _kLastLoginUpdateInterval) {
+      return;
+    }
+    _db
+        .collection('users')
+        .doc(_myId)
+        .update({'lastLoginTime': FieldValue.serverTimestamp()})
+        .catchError((Object e) => debugPrint('最終ログイン時刻の更新エラー: $e'));
+  }
+
+  // ==========================================================================
+  // 読み込み
+  // ==========================================================================
+
+  // 性別と1つ目のタグはサーバー側で絞り込む
+  Query<Map<String, dynamic>> _baseQuery() {
+    Query<Map<String, dynamic>> q = _db.collection('users');
+    if (_selectedGender != 'すべて') {
+      q = q.where('gender', isEqualTo: _selectedGender);
+    }
+    if (_selectedTags.isNotEmpty) {
+      q = q.where('tags', arrayContains: _selectedTags.first);
+    }
+    // 💡 段階0は最終ログイン順。lastLoginTime がない人は、この並べ方では
+    //    Firestore の仕様で結果に入らないため、段階1で ID 順に読み込んで拾う
+    return _phase == 0 ? q.orderBy('lastLoginTime', descending: true) : q;
+  }
+
+  // 表示しない理由（表示してよいなら null）
+  // プロフィール未完成・ブロック関係・停止中は除外する
+  String? _hiddenReason(String id, Map<String, dynamic> d) {
+    if (id == _myId) return '自分';
+    if (_excludedIds.contains(id)) return 'ブロック関係';
+    if (d['isBanned'] == true) return '利用停止中';
+
+    final name = _str(d, 'name');
+    if (name.isEmpty || name == '名前未設定' || name == 'ユーザー') return '名前が未設定';
+    if (_ageOf(d) <= 0) return '年齢が未設定';
+    if (_firstImageUrl(d) == null) return '写真がない（または https 以外のURL）';
+    if (_str(d, 'hobby').isEmpty) return '「好きなこと・趣味」が未入力';
+    return null;
+  }
+
+  bool _isDisplayable(String id, Map<String, dynamic> d) {
+    final reason = _hiddenReason(id, d);
+    // 💡 開発中だけ、表示されない理由をログに出す（原因を調べやすくするため）
+    if (kDebugMode && reason != null && reason != '自分') {
+      debugPrint(
+        '検索で非表示: ${id.substring(0, id.length.clamp(0, 8))} 理由: $reason',
+      );
+    }
+    return reason == null;
+  }
+
+  // 検索条件（キーワード・年齢・性別・タグ）に合うか
+  bool _matchesFilters(Map<String, dynamic> d) {
+    final query = _sanitizeQuery(_searchKeyword);
+    if (query.isNotEmpty) {
+      bool contains(dynamic v) {
+        if (v is String) return v.toLowerCase().contains(query);
+        if (v is List) {
+          return v.whereType<String>().any(
+            (s) => s.toLowerCase().contains(query),
+          );
+        }
+        return false;
+      }
+
+      final hit =
+          contains(d['name']) ||
+          contains(d['location']) ||
+          contains(d['hobby']) ||
+          contains(d['recentInterest']) ||
+          contains(d['idealFriend']) ||
+          contains(d['tags']);
+      if (!hit) return false;
+    }
+
+    final age = _ageOf(d);
+    if (age < _minAge || age > _maxAge) return false;
+
+    if (_selectedGender != 'すべて' && _str(d, 'gender') != _selectedGender) {
+      return false;
+    }
+
+    if (_selectedTags.isNotEmpty) {
+      final tags = _stringList(d['tags']);
+      if (!_selectedTags.every(tags.contains)) return false;
+    }
+    return true;
+  }
+
+  int _planPriority(Map<String, dynamic> d) => d['plan'] == 'premium' ? 1 : 0;
+
+  int _hobbyScore(Map<String, dynamic> d) {
+    if (_myHobbyWords.isEmpty) return 0;
+    final buffer = StringBuffer();
+    for (final field in _kHobbyFields) {
+      final v = d[field];
+      if (v is String) buffer.write(' $v');
+      if (v is List) buffer.write(' ${v.whereType<String>().join(' ')}');
+    }
+    final text = buffer.toString().toLowerCase();
+    return _myHobbyWords.where(text.contains).length;
+  }
+
+  // 条件を変えたときは、少し待ってから読み直す（入力中に何度も読まない）
+  void _scheduleReload([Duration delay = const Duration(milliseconds: 450)]) {
+    _debounce?.cancel();
+    _debounce = Timer(delay, _reload);
+  }
+
+  void _reload() {
+    if (!mounted || _initializing || _initFailed) return;
+    _requestId++;
+    setState(() {
+      _results.clear();
+      _resultIds.clear();
+      _cursor = null;
+      _phase = 0;
+      _hasMore = true;
+      _loading = false;
+      _loadFailed = false;
+    });
+    if (_selectedTab == 'recommend') {
+      _loadRecommend();
+    } else {
+      _loadMore();
+    }
+  }
+
+  void _onScroll(ScrollController c) {
+    if (_selectedTab != 'all' || !c.hasClients) return;
+    if (c.position.pixels >= c.position.maxScrollExtent - 600) _loadMore();
+  }
+
+  // 1ページ分読み込み、条件に合う人を追加する
+  Future<List<_Candidate>> _fetchPage(int req) async {
+    var q = _baseQuery().limit(_kPageSize);
+    final cursor = _cursor;
+    if (cursor != null) q = q.startAfterDocument(cursor);
+
+    final int phase = _phase;
+    final snap = await q.get().timeout(_kNetworkTimeout);
+    if (req != _requestId) return const [];
+
+    if (snap.docs.isNotEmpty) _cursor = snap.docs.last;
+    if (snap.docs.length < _kPageSize) {
+      if (phase == 0) {
+        // 最終ログイン順を読み終えたら、lastLoginTime がない人の読み込みに移る
+        _phase = 1;
+        _cursor = null;
+      } else {
+        _hasMore = false;
+      }
+    }
+
+    final result = [
+      for (final doc in snap.docs)
+        // 段階1では、段階0で読んだ人（lastLoginTime がある人）は飛ばす
+        if (!(phase == 1 && doc.data()['lastLoginTime'] is Timestamp) &&
+            !_resultIds.contains(doc.id) &&
+            _isDisplayable(doc.id, doc.data()) &&
+            _matchesFilters(doc.data()))
+          _Candidate(doc.id, doc.data()),
+    ];
+    debugPrint(
+      '検索: 段階$phase で${snap.docs.length}人を読み込み、${result.length}人が条件に一致',
+    );
+    return result;
+  }
+
+  // 💡 ID検索：プロフィールに表示される英数字のIDで前方一致検索（サーバー側）
+  Future<List<_Candidate>> _fetchIdMatches(int req) async {
+    final raw = _searchKeyword.trim();
+    if (!_kIdPattern.hasMatch(raw)) return const [];
+    try {
+      final snap = await _db
+          .collection('users')
+          .where(FieldPath.documentId, isGreaterThanOrEqualTo: raw)
+          .where(FieldPath.documentId, isLessThan: '$raw$_kIdUpperBound')
+          .limit(5)
+          .get()
+          .timeout(_kNetworkTimeout);
+      if (req != _requestId) return const [];
+      return [
+        for (final doc in snap.docs)
+          if (_isDisplayable(doc.id, doc.data()))
+            _Candidate(doc.id, doc.data()),
+      ];
+    } catch (e) {
+      debugPrint('ID検索エラー: $e');
+      return const [];
+    }
+  }
+
+  void _addResults(List<_Candidate> items) {
+    for (final c in items) {
+      if (_resultIds.add(c.id)) _results.add(c);
+    }
+  }
+
+  // 「ユーザー」タブ：最近ログインした順に、続きを読み込む
+  Future<void> _loadMore() async {
+    if (_loading || !_hasMore || _selectedTab != 'all') return;
+    final req = _requestId;
+    setState(() {
+      _loading = true;
+      _loadFailed = false;
+    });
+
+    try {
+      final batch = <_Candidate>[];
+      if (_cursor == null) batch.addAll(await _fetchIdMatches(req));
+
+      int scanned = 0;
+      while (batch.length < _kMinResultsPerLoad &&
+          scanned < _kMaxScanPerLoad &&
+          _hasMore &&
+          req == _requestId) {
+        final page = await _fetchPage(req);
+        scanned += _kPageSize;
+        batch.addAll(page.where((c) => !batch.any((b) => b.id == c.id)));
+      }
+      if (req != _requestId) return;
+
+      // 💡 読み込んだまとまりの中で、プレミアムプランの人を先に表示
+      batch.sort(
+        (a, b) => _planPriority(b.data).compareTo(_planPriority(a.data)),
+      );
+      _addResults(batch);
+    } catch (e) {
+      debugPrint('ユーザー検索エラー: $e');
+      if (req == _requestId) _loadFailed = true;
+    } finally {
+      if (mounted && req == _requestId) setState(() => _loading = false);
+    }
+  }
+
+  // 「おすすめ」タブ：最近ログインした人の中から、趣味が近い人を並べる
+  Future<void> _loadRecommend() async {
+    final req = _requestId;
+    setState(() {
+      _loading = true;
+      _loadFailed = false;
+    });
+
+    try {
+      final pool = <_Candidate>[];
+      pool.addAll(await _fetchIdMatches(req));
+      int scanned = 0;
+      while (scanned < _kRecommendPool && _hasMore && req == _requestId) {
+        pool.addAll(await _fetchPage(req));
+        scanned += _kPageSize;
+      }
+      if (req != _requestId) return;
+
+      final scored =
+          pool
+              .map((c) => MapEntry(c, _hobbyScore(c.data)))
+              .where((e) => e.value > 0)
+              .toList()
+            ..sort((a, b) {
+              final plan = _planPriority(
+                b.key.data,
+              ).compareTo(_planPriority(a.key.data));
+              return plan != 0 ? plan : b.value.compareTo(a.value);
+            });
+
+      // 💡 おすすめが0人で、自分でタブを選んだのでなければ「ユーザー」タブに切り替える
+      if (scored.isEmpty && !_isManualSelection) {
+        _selectedTab = 'all';
+        _loading = false;
+        _reload();
+        return;
+      }
+
+      _hasMore = false;
+      _addResults(scored.map((e) => e.key).toList());
+    } catch (e) {
+      debugPrint('おすすめ取得エラー: $e');
+      if (req == _requestId) _loadFailed = true;
+    } finally {
+      if (mounted && req == _requestId) setState(() => _loading = false);
+    }
+  }
+
+  // ==========================================================================
+  // 画面
+  // ==========================================================================
+  @override
+  Widget build(BuildContext context) {
+    if (_myId.isEmpty) {
       return const Scaffold(
         backgroundColor: Colors.white,
         body: Center(
@@ -92,413 +566,135 @@ class _SearchScreenState extends State<SearchScreen> {
       body: Column(
         children: [
           _buildSearchBar(context),
-          Expanded(
-            child: StreamBuilder<QuerySnapshot>(
-              stream: FirebaseFirestore.instance
-                  .collection('users')
-                  .snapshots(),
-              builder: (context, snapshot) {
-                if (snapshot.hasError)
-                  return const Center(child: Text('エラーが発生しました'));
-                if (snapshot.connectionState == ConnectionState.waiting) {
-                  return const Center(child: CircularProgressIndicator());
-                }
-
-                return StreamBuilder<DocumentSnapshot>(
-                  stream: FirebaseFirestore.instance
-                      .collection('users')
-                      .doc(myId)
-                      .snapshots(),
-                  builder: (context, mySnapshot) {
-                    if (mySnapshot.hasError) {
-                      return const Center(child: Text('エラーが発生しました'));
-                    }
-                    if (!mySnapshot.hasData)
-                      return const Center(child: CircularProgressIndicator());
-
-                    final myData =
-                        mySnapshot.data!.data() as Map<String, dynamic>? ?? {};
-
-                    // 💡 趣味・嗜好に関連するフィールド一覧
-                    //    （廃止された hobbyDetail / anime / game / artist / favoriteFood /
-                    //      dislikeFood は削除し、実在するフィールドのみに整理）
-                    final List<String> hobbyFields = [
-                      'hobby',
-                      'recentInterest',
-                    ];
-
-                    final List<String> ignoreWords = [
-                      'なし',
-                      '未設定',
-                      '特になし',
-                      '未入力',
-                      '設定なし',
-                      'ありません',
-                      '特になしです',
-                    ];
-
-                    // 💡 キーワード同士を区切る文字は「、」（全角・半角の読点）のみとする。
-                    //    これにより、「、」で区切られたフレーズ全体
-                    //   （スペースや「・」を含んでいても）が1つのキーワードとして扱われる
-                    const String _wordSeparatorPattern = r'[、,，]+';
-
-                    // 💡 各キーワードの前後だけに残ってしまう記号を取り除くための
-                    //    トリム用パターン（内部の空白や記号は保持する）
-                    const String _edgeSymbolPattern =
-                        r'[。．/・\s　!！?？()（）「」『』【】:：;；\-－~〜…]+';
-
-                    // 文字列を「、」でキーワード単位に分割する
-                    //    （読点区切りのフレーズを、それ以上細かく分割しない）
-                    List<String> _splitToKeywords(String text) {
-                      return text
-                          .split(RegExp(_wordSeparatorPattern))
-                          .map(
-                            (s) => s
-                                .replaceAll(
-                                  RegExp(
-                                    '^$_edgeSymbolPattern|$_edgeSymbolPattern\$',
-                                  ),
-                                  '',
-                                )
-                                .trim()
-                                .toLowerCase(),
-                          )
-                          .where(
-                            (s) => s.length >= 2 && !ignoreWords.contains(s),
-                          ) // 1文字語は誤マッチしやすいので除外
-                          .toList();
-                    }
-
-                    // 💡 検索バーに入力された文字列も、前後にくっついた句読点・記号を
-                    //    取り除いてから照合に使う（「カフェ巡り、」のような入力でも
-                    //    正しく一致判定できるようにするため）
-                    String _sanitizeSearchQuery(String text) {
-                      return text.trim().toLowerCase().replaceAll(
-                        RegExp('^$_edgeSymbolPattern|$_edgeSymbolPattern\$'),
-                        '',
-                      );
-                    }
-
-                    // --- 自分の全趣味・嗜好フィールドから有効な単語を抽出してリスト化 ---
-                    final List<String> myCleanHobbies = [];
-                    for (var field in hobbyFields) {
-                      final val = myData[field];
-                      if (val == null) continue;
-
-                      if (val is List) {
-                        for (var item in val) {
-                          myCleanHobbies.addAll(
-                            _splitToKeywords(item.toString()),
-                          );
-                        }
-                      } else {
-                        myCleanHobbies.addAll(_splitToKeywords(val.toString()));
-                      }
-                    }
-
-                    // 1. 基本的なキーワード、年齢、性別、ブロック、自分除外の【フィルタリング】
-                    List<QueryDocumentSnapshot>
-                    docs = snapshot.data!.docs.where((doc) {
-                      final data = doc.data() as Map<String, dynamic>;
-                      final String userId = doc.id;
-
-                      final List<dynamic> myBlocks = myData['blocks'] ?? [];
-                      final List<dynamic> blockedBy = myData['blockedBy'] ?? [];
-
-                      // 💡 自分のアカウントは除外
-                      if (userId == myId) return false;
-                      // 💡 ブロック関連アカウントは除外
-                      if (myBlocks.contains(userId)) return false;
-                      if (blockedBy.contains(userId)) return false;
-
-                      // =======================================================
-                      // 🔥【重要】プロフィール未設定ユーザーを検索画面から除外するフィルター
-                      //    💡 廃止された bio の代わりに、必須項目である hobby を
-                      //       プロフィール完成度の判定基準として使用する
-                      // =======================================================
-                      final String name = (data['name'] ?? '')
-                          .toString()
-                          .trim();
-                      final int age =
-                          int.tryParse(data['age']?.toString() ?? '0') ?? 0;
-                      final String hobby = (data['hobby'] ?? '')
-                          .toString()
-                          .trim();
-                      final List<dynamic> imageUrls =
-                          data['imageUrls'] as List? ?? [];
-
-                      // 1. 名前が空、または初期値のままの場合は非表示
-                      if (name.isEmpty || name == '名前未設定' || name == 'ユーザー') {
-                        return false;
-                      }
-                      // 2. 年齢が未登録、または 0 歳の場合は非表示
-                      if (age <= 0) {
-                        return false;
-                      }
-                      // 3. 写真が1枚も登録されていないユーザーは非表示
-                      if (imageUrls.isEmpty) {
-                        return false;
-                      }
-                      // 4. 好きなこと（趣味）が空のままのユーザーは非表示
-                      if (hobby.isEmpty) {
-                        return false;
-                      }
-                      // =======================================================
-
-                      final query = _sanitizeSearchQuery(_searchKeyword);
-                      bool _contains(dynamic value) {
-                        if (value == null) return false;
-                        if (value is List) {
-                          return value.any(
-                            (item) =>
-                                item.toString().toLowerCase().contains(query),
-                          );
-                        }
-                        return value.toString().toLowerCase().contains(query);
-                      }
-
-                      // 💡 検索対象を、実際に存在するフィールドのみに整理
-                      // 💡 サニタイズ後のqueryが空かどうかで判定する
-                      //    （記号だけの入力を「検索している」扱いにしないため）
-                      final bool matchesKeyword =
-                          query.isEmpty ||
-                          (doc.id.toLowerCase().contains(query) ||
-                              _contains(data['name']) ||
-                              _contains(data['location']) ||
-                              _contains(data['hobby']) ||
-                              _contains(data['recentInterest']) ||
-                              _contains(data['idealFriend']) ||
-                              _contains(data['tags']));
-
-                      final int userAge =
-                          int.tryParse(data['age']?.toString() ?? '0') ?? 0;
-                      final bool matchesAge =
-                          (userAge == 0) ||
-                          (userAge >= _minAge && userAge <= _maxAge);
-
-                      final String userGender = data['gender'] ?? '未設定';
-                      final bool matchesGender =
-                          _selectedGender == 'すべて' ||
-                          userGender == _selectedGender;
-
-                      final List<dynamic> userTags =
-                          data['tags'] as List? ?? [];
-                      final bool matchesFilterTags =
-                          _selectedTags.isEmpty ||
-                          _selectedTags.every((tag) => userTags.contains(tag));
-
-                      return matchesKeyword &&
-                          matchesAge &&
-                          matchesGender &&
-                          matchesFilterTags;
-                    }).toList();
-
-                    int getHobbyMatchScore(Map<String, dynamic> targetData) {
-                      int score = 0;
-                      StringBuffer targetBuffer = StringBuffer();
-                      for (var field in hobbyFields) {
-                        final val = targetData[field];
-                        if (val == null) continue;
-                        if (val is List) {
-                          targetBuffer.write(' ${val.join(' ')}');
-                        } else {
-                          targetBuffer.write(' $val');
-                        }
-                      }
-                      final targetText = targetBuffer.toString().toLowerCase();
-
-                      for (var myHobby in myCleanHobbies) {
-                        if (targetText.contains(myHobby)) {
-                          score++;
-                        }
-                      }
-                      return score;
-                    }
-
-                    // 💡 プレミアムプランのユーザーを検索結果で優先表示するための重み付け
-                    //    プレミアムなら1、それ以外は0 → 降順ソートで常に最上位に来る
-                    int getPlanPriority(Map<String, dynamic> targetData) {
-                      final String plan = targetData['plan'] ?? 'free';
-                      return plan == 'premium' ? 1 : 0;
-                    }
-
-                    // 💡 「おすすめ」条件（共通趣味スコアが1以上）に該当する候補を、
-                    //    現在選択中のタブに関わらず常に計算しておく。
-                    //    これにより、ユーザータブ側にいても
-                    //    「おすすめの人が見つかったら自動的に戻す」判定ができる
-                    final List<QueryDocumentSnapshot> recommendDocs = docs
-                        .where((doc) {
-                          final targetData = doc.data() as Map<String, dynamic>;
-                          return getHobbyMatchScore(targetData) > 0;
-                        })
-                        .toList();
-
-                    final bool hasRecommendations =
-                        myCleanHobbies.isNotEmpty && recommendDocs.isNotEmpty;
-
-                    // 2. 選択されたタブ（_selectedTab）に応じた【除外】および【ソート】
-                    if (_selectedTab == 'recommend') {
-                      // 💡 自分のプロフィール（趣味・嗜好）が未設定、または手動選択以外でおすすめが0人の場合
-                      if (!hasRecommendations && !_isManualSelection) {
-                        WidgetsBinding.instance.addPostFrameCallback((_) {
-                          if (mounted && _selectedTab == 'recommend') {
-                            setState(() {
-                              _selectedTab = 'all'; // 『ユーザー』タブに自動変更
-                            });
-                          }
-                        });
-                      } else if (hasRecommendations) {
-                        // プロフィールが設定されていて、おすすめユーザーが存在する場合
-                        docs = recommendDocs;
-                        docs.sort((a, b) {
-                          final aData = a.data() as Map<String, dynamic>;
-                          final bData = b.data() as Map<String, dynamic>;
-                          // 💡 まずプレミアムかどうかで比較し、同じなら趣味マッチ度で比較
-                          final int planCompare = getPlanPriority(
-                            bData,
-                          ).compareTo(getPlanPriority(aData));
-                          if (planCompare != 0) return planCompare;
-                          return getHobbyMatchScore(
-                            bData,
-                          ).compareTo(getHobbyMatchScore(aData));
-                        });
-                      }
-                    } else if (_selectedTab == 'popular') {
-                      // 💡 手動選択でない状態で、おすすめの人が見つかった場合は
-                      //    自動的に「おすすめ」タブへ切り替える
-                      if (hasRecommendations && !_isManualSelection) {
-                        WidgetsBinding.instance.addPostFrameCallback((_) {
-                          if (mounted && _selectedTab != 'recommend') {
-                            setState(() {
-                              _selectedTab = 'recommend';
-                            });
-                          }
-                        });
-                      }
-                      // 【人気順】いいね数（likeCount）が多い順にソート（プレミアム優先は適用しない）
-                      docs.sort((a, b) {
-                        final aData = a.data() as Map<String, dynamic>;
-                        final bData = b.data() as Map<String, dynamic>;
-                        final int aLikes =
-                            int.tryParse(
-                              aData['likeCount']?.toString() ?? '0',
-                            ) ??
-                            0;
-                        final int bLikes =
-                            int.tryParse(
-                              bData['likeCount']?.toString() ?? '0',
-                            ) ??
-                            0;
-                        return bLikes.compareTo(aLikes);
-                      });
-                    } else {
-                      // 💡 手動選択でない状態で、おすすめの人が見つかった場合は
-                      //    自動的に「おすすめ」タブへ切り替える
-                      if (hasRecommendations && !_isManualSelection) {
-                        WidgetsBinding.instance.addPostFrameCallback((_) {
-                          if (mounted && _selectedTab != 'recommend') {
-                            setState(() {
-                              _selectedTab = 'recommend';
-                            });
-                          }
-                        });
-                      }
-                      // 【ユーザー】プレミアムを最優先し、同じ優先度内は最終ログイン順（lastLoginTime）が新しい順にソート
-                      docs.sort((a, b) {
-                        final aData = a.data() as Map<String, dynamic>;
-                        final bData = b.data() as Map<String, dynamic>;
-
-                        final int planCompare = getPlanPriority(
-                          bData,
-                        ).compareTo(getPlanPriority(aData));
-                        if (planCompare != 0) return planCompare;
-
-                        final Timestamp? aTime =
-                            aData['lastLoginTime'] as Timestamp?;
-                        final Timestamp? bTime =
-                            bData['lastLoginTime'] as Timestamp?;
-
-                        if (aTime == null && bTime == null) return 0;
-                        if (aTime == null) return 1;
-                        if (bTime == null) return -1;
-
-                        return bTime.compareTo(aTime);
-                      });
-                    }
-
-                    if (docs.isEmpty) {
-                      return const Center(
-                        child: Text(
-                          '見つかりませんでした',
-                          style: TextStyle(color: Colors.grey, fontSize: 15),
-                        ),
-                      );
-                    }
-
-                    return _isTwoColumn
-                        ? GridView.builder(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 16,
-                              vertical: 8,
-                            ),
-                            gridDelegate:
-                                const SliverGridDelegateWithFixedCrossAxisCount(
-                                  crossAxisCount: 2,
-                                  crossAxisSpacing: 16,
-                                  mainAxisSpacing: 16,
-                                  childAspectRatio: 0.65,
-                                ),
-                            itemCount: docs.length,
-                            itemBuilder: (context, index) {
-                              final data =
-                                  docs[index].data() as Map<String, dynamic>;
-                              return _buildModernUserCard(
-                                context,
-                                userId: docs[index].id,
-                                data: data,
-                              );
-                            },
-                          )
-                        : ListView.builder(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 16,
-                              vertical: 8,
-                            ),
-                            itemCount: docs.length,
-                            itemBuilder: (context, index) {
-                              final data =
-                                  docs[index].data() as Map<String, dynamic>;
-                              return _buildOneColumnCard(
-                                context,
-                                userId: docs[index].id,
-                                data: data,
-                              );
-                            },
-                          );
-                  },
-                );
-              },
-            ),
-          ),
+          Expanded(child: _buildResults()),
         ],
       ),
     );
   }
 
-  // 1カラム（リスト形式）用のカードウィジェット
+  Widget _buildResults() {
+    if (_initializing) return const Center(child: CircularProgressIndicator());
+    if (_initFailed) {
+      return _buildRetry('読み込みに失敗しました', _init);
+    }
+    if (_results.isEmpty) {
+      if (_loading) return const Center(child: CircularProgressIndicator());
+      if (_loadFailed) return _buildRetry('読み込みに失敗しました', _reload);
+      return RefreshIndicator(
+        onRefresh: () async => _reload(),
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          children: const [
+            SizedBox(height: 160),
+            Center(
+              child: Text(
+                '見つかりませんでした',
+                style: TextStyle(color: Colors.grey, fontSize: 15),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    final int footer = (_loading || _loadFailed || _hasMore) ? 1 : 0;
+
+    final Widget list = _isTwoColumn
+        ? GridView.builder(
+            controller: _gridController,
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 2,
+              crossAxisSpacing: 16,
+              mainAxisSpacing: 16,
+              childAspectRatio: 0.65,
+            ),
+            itemCount: _results.length + footer,
+            itemBuilder: (context, index) {
+              if (index >= _results.length) return _buildFooter();
+              final c = _results[index];
+              return _buildModernUserCard(context, userId: c.id, data: c.data);
+            },
+          )
+        : ListView.builder(
+            controller: _listController,
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            itemCount: _results.length + footer,
+            itemBuilder: (context, index) {
+              if (index >= _results.length) return _buildFooter();
+              final c = _results[index];
+              return _buildOneColumnCard(context, userId: c.id, data: c.data);
+            },
+          );
+
+    return RefreshIndicator(onRefresh: () async => _reload(), child: list);
+  }
+
+  Widget _buildFooter() {
+    if (_loadFailed) {
+      return Center(
+        child: TextButton(
+          onPressed: () {
+            setState(() => _loadFailed = false);
+            _loadMore();
+          },
+          child: const Text('再読み込み'),
+        ),
+      );
+    }
+    if (_hasMore && !_loading && _selectedTab == 'all') {
+      // 画面が埋まらず、スクロールできないときのために自動で続きを読む
+      WidgetsBinding.instance.addPostFrameCallback((_) => _loadMore());
+    }
+    return const Center(
+      child: Padding(
+        padding: EdgeInsets.all(16),
+        child: SizedBox(
+          width: 20,
+          height: 20,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildRetry(String message, VoidCallback onRetry) {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(message, style: const TextStyle(color: Colors.grey)),
+          const SizedBox(height: 8),
+          TextButton(onPressed: onRetry, child: const Text('再読み込み')),
+        ],
+      ),
+    );
+  }
+
+  void _openProfile(String userId, Map<String, dynamic> data) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ProfileDetailScreen(userData: data, userId: userId),
+      ),
+    );
+  }
+
+  // 1カラム（リスト形式）用のカード
   Widget _buildOneColumnCard(
     BuildContext context, {
     required String userId,
     required Map<String, dynamic> data,
   }) {
-    final String name = data['name'] ?? '名前なし';
-    final String age = data['age']?.toString() ?? '--';
-    final String gender = data['gender'] ?? '未設定';
-    // 💡 「自己紹介」→「好きなこと（趣味）」に変更（hobbyフィールドを表示）
-    final String hobby = data['hobby'] ?? '未設定';
-    // 💡 「ハマっていること」の表示元を、存在しない'interests'から'recentInterest'に修正
-    final String recentInterest = data['recentInterest'] ?? '未設定';
-    final String target = data['idealFriend'] ?? '未設定';
+    final String name = _str(data, 'name', '名前なし');
+    final int ageNum = _ageOf(data);
+    final String age = ageNum > 0 ? '$ageNum' : '--';
+    final String gender = _str(data, 'gender', '未設定');
+    final String hobby = _str(data, 'hobby', '未設定');
+    final String recentInterest = _str(data, 'recentInterest', '未設定');
+    final String target = _str(data, 'idealFriend', '未設定');
     final String? imageUrl = _firstImageUrl(data);
 
     final IconData genderIcon = gender == '男性'
@@ -508,9 +704,10 @@ class _SearchScreenState extends State<SearchScreen> {
         ? Colors.blue
         : (gender == '女性' ? Colors.pink : Colors.purple);
 
-    final double screenWidth = MediaQuery.of(context).size.width;
     final int cacheWidth =
-        (screenWidth * MediaQuery.of(context).devicePixelRatio).round();
+        (MediaQuery.sizeOf(context).width *
+                MediaQuery.devicePixelRatioOf(context))
+            .round();
 
     return Card(
       color: Colors.white,
@@ -519,19 +716,10 @@ class _SearchScreenState extends State<SearchScreen> {
       clipBehavior: Clip.antiAlias,
       elevation: 2,
       child: InkWell(
-        onTap: () {
-          Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (context) =>
-                  ProfileDetailScreen(userData: data, userId: userId),
-            ),
-          );
-        },
+        onTap: () => _openProfile(userId, data),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // 画像エリア
             SizedBox(
               height: 280,
               width: double.infinity,
@@ -540,9 +728,8 @@ class _SearchScreenState extends State<SearchScreen> {
                       imageUrl: imageUrl,
                       fit: BoxFit.cover,
                       memCacheWidth: cacheWidth,
-                      placeholder: (context, url) =>
-                          Container(color: Colors.grey[50]),
-                      errorWidget: (context, url, error) => Container(
+                      placeholder: (_, __) => Container(color: Colors.grey[50]),
+                      errorWidget: (_, __, ___) => Container(
                         color: Colors.grey[100],
                         child: const Icon(
                           Icons.broken_image,
@@ -559,7 +746,6 @@ class _SearchScreenState extends State<SearchScreen> {
                       ),
                     ),
             ),
-
             Padding(
               padding: const EdgeInsets.all(20.0),
               child: Column(
@@ -570,6 +756,8 @@ class _SearchScreenState extends State<SearchScreen> {
                       Expanded(
                         child: Text(
                           name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
                             fontWeight: FontWeight.w900,
                             fontSize: 24,
@@ -586,42 +774,21 @@ class _SearchScreenState extends State<SearchScreen> {
                           color: Colors.black54,
                         ),
                       ),
-                      if (gender != '未設定' && gender.isNotEmpty) ...[
+                      if (gender != '未設定') ...[
                         const SizedBox(width: 4),
                         Icon(genderIcon, color: genderColor, size: 20),
                       ],
                     ],
                   ),
                   const SizedBox(height: 20),
-                  _buildSectionTitle("好きなこと（趣味）"),
-                  Text(
-                    hobby,
-                    style: const TextStyle(
-                      fontSize: 15,
-                      color: Colors.black87,
-                      height: 1.5,
-                    ),
-                  ),
+                  _buildSectionTitle('好きなこと（趣味）'),
+                  _buildBodyText(hobby),
                   const SizedBox(height: 16),
-                  _buildSectionTitle("最近特にハマってること"),
-                  Text(
-                    recentInterest,
-                    style: const TextStyle(
-                      fontSize: 15,
-                      color: Colors.black87,
-                      height: 1.5,
-                    ),
-                  ),
+                  _buildSectionTitle('最近特にハマってること'),
+                  _buildBodyText(recentInterest),
                   const SizedBox(height: 16),
-                  _buildSectionTitle("どんな友達を作りたい？"),
-                  Text(
-                    target,
-                    style: const TextStyle(
-                      fontSize: 15,
-                      color: Colors.black87,
-                      height: 1.5,
-                    ),
-                  ),
+                  _buildSectionTitle('どんな友達を作りたい？'),
+                  _buildBodyText(target),
                 ],
               ),
             ),
@@ -631,34 +798,41 @@ class _SearchScreenState extends State<SearchScreen> {
     );
   }
 
-  // 2カラム（グリッド形式）用のカードウィジェット
+  Widget _buildBodyText(String text) {
+    return Text(
+      text,
+      maxLines: 6,
+      overflow: TextOverflow.ellipsis,
+      style: const TextStyle(fontSize: 15, color: Colors.black87, height: 1.5),
+    );
+  }
+
+  // 2カラム（グリッド形式）用のカード
   Widget _buildModernUserCard(
     BuildContext context, {
     required String userId,
     required Map<String, dynamic> data,
   }) {
-    final String name = data['name'] ?? '名前なし';
-    final String age = data['age']?.toString() ?? '--';
-    final String location = data['location'] ?? '未設定';
-    // 💡 存在しない'interests'フィールドの代わりに'recentInterest'を表示
-    final String recentInterest =
-        data['recentInterest'] ?? '最近特にハマってることはまだありません。';
+    final String name = _str(data, 'name', '名前なし');
+    final int ageNum = _ageOf(data);
+    final String age = ageNum > 0 ? '$ageNum' : '--';
+    final String location = _str(data, 'location', '未設定');
+    final String recentInterest = _str(
+      data,
+      'recentInterest',
+      '最近特にハマってることはまだありません。',
+    );
+    final String gender = _str(data, 'gender');
     final String? imageUrl = _firstImageUrl(data);
 
-    final double gridWidth = MediaQuery.of(context).size.width / 2;
-    final int cacheWidth = (gridWidth * MediaQuery.of(context).devicePixelRatio)
-        .round();
+    final int cacheWidth =
+        (MediaQuery.sizeOf(context).width /
+                2 *
+                MediaQuery.devicePixelRatioOf(context))
+            .round();
 
     return InkWell(
-      onTap: () {
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (context) =>
-                ProfileDetailScreen(userData: data, userId: userId),
-          ),
-        );
-      },
+      onTap: () => _openProfile(userId, data),
       borderRadius: BorderRadius.circular(20),
       child: Container(
         decoration: BoxDecoration(
@@ -666,7 +840,7 @@ class _SearchScreenState extends State<SearchScreen> {
           borderRadius: BorderRadius.circular(20),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withOpacity(0.05),
+              color: Colors.black.withValues(alpha: 0.05),
               blurRadius: 10,
               offset: const Offset(0, 4),
             ),
@@ -691,9 +865,9 @@ class _SearchScreenState extends State<SearchScreen> {
                           width: double.infinity,
                           height: double.infinity,
                           memCacheWidth: cacheWidth,
-                          placeholder: (context, url) =>
+                          placeholder: (_, __) =>
                               Container(color: Colors.grey[50]),
-                          errorWidget: (context, url, error) => Container(
+                          errorWidget: (_, __, ___) => Container(
                             color: Colors.grey[100],
                             child: const Icon(
                               Icons.broken_image,
@@ -743,41 +917,9 @@ class _SearchScreenState extends State<SearchScreen> {
                             fontWeight: FontWeight.w500,
                           ),
                         ),
-                        if (data.containsKey('gender')) ...[
+                        if (gender.isNotEmpty) ...[
                           const SizedBox(width: 4),
-                          Builder(
-                            builder: (context) {
-                              final gender = data['gender'];
-                              final Color bgColor = gender == '男性'
-                                  ? Colors.blue.withOpacity(0.15)
-                                  : (gender == '女性'
-                                        ? Colors.pink.withOpacity(0.15)
-                                        : Colors.purple.withOpacity(0.15));
-                              final Color iconColor = gender == '男性'
-                                  ? Colors.blue
-                                  : (gender == '女性'
-                                        ? Colors.pink
-                                        : Colors.purple);
-                              final IconData iconData = gender == '男性'
-                                  ? Icons.male
-                                  : (gender == '女性'
-                                        ? Icons.female
-                                        : Icons.transgender);
-
-                              return Container(
-                                padding: const EdgeInsets.all(2),
-                                decoration: BoxDecoration(
-                                  color: bgColor,
-                                  shape: BoxShape.circle,
-                                ),
-                                child: Icon(
-                                  iconData,
-                                  color: iconColor,
-                                  size: 12,
-                                ),
-                              );
-                            },
-                          ),
+                          _buildGenderBadge(gender),
                         ],
                       ],
                     ),
@@ -790,7 +932,14 @@ class _SearchScreenState extends State<SearchScreen> {
                           color: AppColors.point,
                         ),
                         const SizedBox(width: 2),
-                        Text(location, style: const TextStyle(fontSize: 13)),
+                        Expanded(
+                          child: Text(
+                            location,
+                            style: const TextStyle(fontSize: 13),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
                       ],
                     ),
                     const SizedBox(height: 8),
@@ -809,6 +958,23 @@ class _SearchScreenState extends State<SearchScreen> {
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildGenderBadge(String gender) {
+    final Color color = gender == '男性'
+        ? Colors.blue
+        : (gender == '女性' ? Colors.pink : Colors.purple);
+    final IconData icon = gender == '男性'
+        ? Icons.male
+        : (gender == '女性' ? Icons.female : Icons.transgender);
+    return Container(
+      padding: const EdgeInsets.all(2),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.15),
+        shape: BoxShape.circle,
+      ),
+      child: Icon(icon, color: color, size: 12),
     );
   }
 
@@ -831,10 +997,12 @@ class _SearchScreenState extends State<SearchScreen> {
     final bool isSelected = _selectedTab == tabValue;
     return GestureDetector(
       onTap: () {
+        if (_selectedTab == tabValue) return;
         setState(() {
           _isManualSelection = true;
           _selectedTab = tabValue;
         });
+        _reload();
       },
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -865,9 +1033,14 @@ class _SearchScreenState extends State<SearchScreen> {
         children: [
           Expanded(
             child: TextField(
-              onChanged: (value) => setState(() => _searchKeyword = value),
+              maxLength: 50,
+              onChanged: (value) {
+                _searchKeyword = value;
+                _scheduleReload(const Duration(milliseconds: 500));
+              },
               decoration: InputDecoration(
-                hintText: 'キーワードで検索',
+                hintText: 'キーワード・IDで検索',
+                counterText: '',
                 prefixIcon: const Icon(
                   Icons.search,
                   color: Colors.grey,
@@ -906,12 +1079,12 @@ class _SearchScreenState extends State<SearchScreen> {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(25)),
       ),
-      builder: (context) {
+      builder: (sheetContext) {
         return StatefulBuilder(
-          builder: (context, setSheetState) {
+          builder: (sheetContext, setSheetState) {
             return Container(
               padding: const EdgeInsets.all(24.0),
-              height: MediaQuery.of(context).size.height * 0.85, // 少し余裕を持たせる
+              height: MediaQuery.sizeOf(sheetContext).height * 0.85,
               child: SingleChildScrollView(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -925,7 +1098,7 @@ class _SearchScreenState extends State<SearchScreen> {
                     ),
                     const SizedBox(height: 24),
 
-                    // --- タグ選択欄 ---
+                    // --- タグ ---
                     const Text(
                       'タグで絞り込む',
                       style: TextStyle(fontWeight: FontWeight.bold),
@@ -939,18 +1112,17 @@ class _SearchScreenState extends State<SearchScreen> {
                         return FilterChip(
                           label: Text(tag),
                           selected: isSelected,
-                          selectedColor: AppColors.point.withOpacity(0.3),
+                          selectedColor: AppColors.point.withValues(alpha: 0.3),
                           onSelected: (val) {
                             setSheetState(() {
                               if (val) {
-                                if (!_selectedTags.contains(tag)) {
+                                if (!_selectedTags.contains(tag))
                                   _selectedTags.add(tag);
-                                }
                               } else {
                                 _selectedTags.remove(tag);
                               }
                             });
-                            setState(() {}); // 検索結果を即時反映
+                            _scheduleReload();
                           },
                         );
                       }).toList(),
@@ -963,20 +1135,20 @@ class _SearchScreenState extends State<SearchScreen> {
                       style: TextStyle(fontWeight: FontWeight.bold),
                     ),
                     const SizedBox(height: 8),
-                    Row(
+                    Wrap(
+                      spacing: 8,
                       children: ['すべて', '男性', '女性', 'その他']
                           .map(
-                            (g) => Padding(
-                              padding: const EdgeInsets.only(right: 8),
-                              child: ChoiceChip(
-                                label: Text(g),
-                                selected: _selectedGender == g,
-                                selectedColor: AppColors.point.withOpacity(0.2),
-                                onSelected: (val) {
-                                  setSheetState(() => _selectedGender = g);
-                                  setState(() {});
-                                },
+                            (g) => ChoiceChip(
+                              label: Text(g),
+                              selected: _selectedGender == g,
+                              selectedColor: AppColors.point.withValues(
+                                alpha: 0.2,
                               ),
+                              onSelected: (_) {
+                                setSheetState(() => _selectedGender = g);
+                                _scheduleReload();
+                              },
                             ),
                           )
                           .toList(),
@@ -1014,17 +1186,16 @@ class _SearchScreenState extends State<SearchScreen> {
                           _minAge = values.start.round();
                           _maxAge = values.end.round();
                         });
-                        setState(() {});
+                        _scheduleReload(const Duration(milliseconds: 600));
                       },
                     ),
                     const SizedBox(height: 32),
 
-                    // --- 適用ボタン ---
                     SizedBox(
                       width: double.infinity,
                       height: 50,
                       child: ElevatedButton(
-                        onPressed: () => Navigator.pop(context),
+                        onPressed: () => Navigator.pop(sheetContext),
                         style: ElevatedButton.styleFrom(
                           backgroundColor: Colors.black87,
                         ),

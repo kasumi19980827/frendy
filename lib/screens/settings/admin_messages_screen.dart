@@ -1,12 +1,151 @@
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
-class AdminMessagesScreen extends StatelessWidget {
+// ============================================================================
+// 運営からのメッセージ（お知らせ一覧）
+//
+// 💡 5万人規模を想定した作り
+//  ・以前は最大100件を「リアルタイム監視」していたため、開くたびに最大100件分の
+//    読み取り料金がかかっていた（5万人が1回ずつ開くと最大500万件）。
+//  ・お知らせはめったに変わらないので、リアルタイム監視をやめて、
+//    新しい順に20件ずつ読み込む方式に変更（下に引っぱると最新に更新）。
+//
+// 💡 セキュリティ
+//  ・お知らせを書けるのは運営だけ（セキュリティルールの admin_messages で isAdmin のみ）
+//  ・本文はただの文字として表示する（リンクやHTMLとして解釈しない）
+//  ・型が違うデータが入っていてもクラッシュしない
+// ============================================================================
+
+const Duration _kNetworkTimeout = Duration(seconds: 20);
+const int _kPageSize = 20;
+const int _kMaxMessages = 200; // さかのぼって読み込む上限
+
+class _AdminMessage {
+  const _AdminMessage({
+    required this.id,
+    required this.title,
+    required this.body,
+    required this.createdAt,
+  });
+
+  final String id;
+  final String title;
+  final String body;
+  final DateTime? createdAt;
+
+  factory _AdminMessage.fromDoc(
+    QueryDocumentSnapshot<Map<String, dynamic>> doc,
+  ) {
+    final d = doc.data();
+    final rawTitle = d['title'];
+    final rawBody = d['body'];
+    final rawDate = d['createdAt'];
+    return _AdminMessage(
+      id: doc.id,
+      title: rawTitle is String && rawTitle.trim().isNotEmpty
+          ? rawTitle.trim()
+          : 'お知らせ',
+      body: rawBody is String ? rawBody : '',
+      createdAt: rawDate is Timestamp ? rawDate.toDate() : null,
+    );
+  }
+}
+
+class AdminMessagesScreen extends StatefulWidget {
   const AdminMessagesScreen({super.key});
 
-  // 💡 お知らせが増え続けても無制限に全件取得しないよう上限を設ける
-  static const int _messageFetchLimit = 100;
+  @override
+  State<AdminMessagesScreen> createState() => _AdminMessagesScreenState();
+}
+
+class _AdminMessagesScreenState extends State<AdminMessagesScreen> {
+  final ScrollController _scrollController = ScrollController();
+  final DateFormat _dateFormat = DateFormat('yyyy/MM/dd HH:mm');
+
+  final List<_AdminMessage> _messages = [];
+  DocumentSnapshot<Map<String, dynamic>>? _cursor;
+  bool _hasMore = true;
+  bool _loading = false;
+  bool _loadFailed = false;
+  bool _firstLoadDone = false;
+  int _requestId = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _scrollController.addListener(_onScroll);
+    _loadMore();
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  void _onScroll() {
+    if (!_scrollController.hasClients) return;
+    final pos = _scrollController.position;
+    if (pos.pixels >= pos.maxScrollExtent - 300) _loadMore();
+  }
+
+  // 下に引っぱったとき：最初から読み直す
+  Future<void> _refresh() async {
+    _requestId++;
+    setState(() {
+      _messages.clear();
+      _cursor = null;
+      _hasMore = true;
+      _loading = false;
+      _loadFailed = false;
+    });
+    await _loadMore();
+  }
+
+  Future<void> _loadMore() async {
+    if (_loading || !_hasMore || _messages.length >= _kMaxMessages) return;
+    final req = _requestId;
+    setState(() {
+      _loading = true;
+      _loadFailed = false;
+    });
+
+    try {
+      Query<Map<String, dynamic>> q = FirebaseFirestore.instance
+          .collection('admin_messages')
+          .orderBy('createdAt', descending: true)
+          .limit(_kPageSize);
+      final cursor = _cursor;
+      if (cursor != null) q = q.startAfterDocument(cursor);
+
+      final snap = await q.get().timeout(_kNetworkTimeout);
+      if (req != _requestId || !mounted) return;
+
+      setState(() {
+        if (snap.docs.isNotEmpty) _cursor = snap.docs.last;
+        _hasMore =
+            snap.docs.length >= _kPageSize &&
+            _messages.length + snap.docs.length < _kMaxMessages;
+        _messages.addAll(snap.docs.map(_AdminMessage.fromDoc));
+      });
+    } catch (e) {
+      debugPrint('お知らせ取得エラー: $e');
+      if (req == _requestId && mounted) setState(() => _loadFailed = true);
+    } finally {
+      if (req == _requestId && mounted) {
+        setState(() {
+          _loading = false;
+          _firstLoadDone = true;
+        });
+      }
+    }
+  }
+
+  String _formatDate(DateTime? date) =>
+      date == null ? '' : _dateFormat.format(date);
 
   @override
   Widget build(BuildContext context) {
@@ -24,114 +163,124 @@ class AdminMessagesScreen extends StatelessWidget {
           child: Container(color: Colors.grey[200], height: 1.0),
         ),
       ),
-      // リストの一番下に余白を作るため、ListViewの外側をSafeAreaやPaddingで制御
-      body: SafeArea(
-        child: StreamBuilder<QuerySnapshot>(
-          stream: FirebaseFirestore.instance
-              .collection('admin_messages')
-              .orderBy('createdAt', descending: true)
-              .limit(_messageFetchLimit)
-              .snapshots(),
-          builder: (context, snapshot) {
-            if (snapshot.hasError)
-              return const Center(child: Text('エラーが発生しました'));
-            if (snapshot.connectionState == ConnectionState.waiting) {
-              return const Center(child: CircularProgressIndicator());
-            }
+      body: SafeArea(child: _buildBody()),
+    );
+  }
 
-            final List<DocumentSnapshot> messages = snapshot.data?.docs ?? [];
+  Widget _buildBody() {
+    if (!_firstLoadDone && _messages.isEmpty) {
+      return const Center(child: CircularProgressIndicator());
+    }
 
-            // 💡 ダミー（架空）のお知らせを表示するのは、実在しない公式情報を
-            //    ユーザーに見せてしまうことになり、Apple審査でも問題視される。
-            //    実データが1件もない場合は、正直に「お知らせはありません」と表示する
-            if (messages.isEmpty) {
-              return const Center(
-                child: Padding(
-                  padding: EdgeInsets.all(24.0),
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(Icons.mail_outline, size: 48, color: Colors.grey),
-                      SizedBox(height: 12),
-                      Text(
-                        '現在、お知らせはありません',
-                        style: TextStyle(color: Colors.grey, fontSize: 14),
-                      ),
-                    ],
-                  ),
+    if (_messages.isEmpty) {
+      // 💡 ダミーのお知らせは表示しない（実在しない公式情報になるため。Apple審査対策）
+      return RefreshIndicator(
+        onRefresh: _refresh,
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          children: [
+            const SizedBox(height: 160),
+            Icon(
+              _loadFailed ? Icons.wifi_off : Icons.mail_outline,
+              size: 48,
+              color: Colors.grey,
+            ),
+            const SizedBox(height: 12),
+            Text(
+              _loadFailed
+                  ? '読み込みに失敗しました。\n下に引っぱって再読み込みしてください'
+                  : '現在、お知らせはありません',
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Colors.grey,
+                fontSize: 14,
+                height: 1.5,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    final bool showFooter = _loading || _loadFailed || _hasMore;
+
+    return RefreshIndicator(
+      onRefresh: _refresh,
+      child: ListView.builder(
+        controller: _scrollController,
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: EdgeInsets.zero,
+        itemCount: _messages.length + (showFooter ? 1 : 0),
+        itemBuilder: (context, index) {
+          if (index >= _messages.length) return _buildFooter();
+
+          final m = _messages[index];
+          final dateStr = _formatDate(m.createdAt);
+
+          return Container(
+            decoration: BoxDecoration(
+              border: Border(
+                bottom: BorderSide(color: Colors.grey[200]!, width: 1),
+              ),
+            ),
+            child: ListTile(
+              title: Text(
+                m.title,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 15,
+                  color: Colors.black87,
                 ),
-              );
-            }
+              ),
+              subtitle: Padding(
+                padding: const EdgeInsets.only(top: 6.0),
+                child: Text(
+                  dateStr,
+                  style: const TextStyle(color: Colors.grey, fontSize: 12),
+                ),
+              ),
+              trailing: const Icon(
+                Icons.chevron_right,
+                color: Colors.grey,
+                size: 20,
+              ),
+              onTap: () => _showMessageDetail(m.title, m.body, dateStr),
+            ),
+          );
+        },
+      ),
+    );
+  }
 
-            return ListView.builder(
-              padding: EdgeInsets.zero, // 上下の不要なパディングをリセット
-              itemCount: messages.length,
-              itemBuilder: (context, index) {
-                final data = messages[index].data() as Map<String, dynamic>;
-                final String title = data['title'] ?? 'お知らせ';
-                final String body = data['body'] ?? '';
-
-                final Timestamp? createdAt = data['createdAt'] as Timestamp?;
-                String dateStr = '';
-                if (createdAt != null) {
-                  dateStr = DateFormat(
-                    'yyyy/MM/dd HH:mm',
-                  ).format(createdAt.toDate());
-                }
-
-                return Container(
-                  // 一番下の項目も含め、すべての要素の下に確実に線を引く
-                  decoration: BoxDecoration(
-                    border: Border(
-                      bottom: BorderSide(color: Colors.grey[200]!, width: 1),
-                    ),
-                  ),
-                  child: ListTile(
-                    title: Text(
-                      title,
-                      style: const TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 15,
-                        color: Colors.black87,
-                      ),
-                    ),
-                    subtitle: Padding(
-                      padding: const EdgeInsets.only(top: 6.0),
-                      child: Text(
-                        dateStr,
-                        style: const TextStyle(
-                          color: Colors.grey,
-                          fontSize: 12,
-                        ),
-                      ),
-                    ),
-                    trailing: const Icon(
-                      Icons.chevron_right,
-                      color: Colors.grey,
-                      size: 20,
-                    ),
-                    onTap: () =>
-                        _showMessageDetail(context, title, body, dateStr),
-                  ),
-                );
-              },
-            );
-          },
+  Widget _buildFooter() {
+    if (_loadFailed) {
+      return Center(
+        child: TextButton(onPressed: _loadMore, child: const Text('再読み込み')),
+      );
+    }
+    if (!_loading && _hasMore) {
+      // 画面が埋まらずスクロールできないときのために、自動で続きを読む
+      WidgetsBinding.instance.addPostFrameCallback((_) => _loadMore());
+    }
+    return const Padding(
+      padding: EdgeInsets.all(16),
+      child: Center(
+        child: SizedBox(
+          width: 20,
+          height: 20,
+          child: CircularProgressIndicator(strokeWidth: 2),
         ),
       ),
     );
   }
 
   // 詳細ポップアップ
-  void _showMessageDetail(
-    BuildContext context,
-    String title,
-    String body,
-    String date,
-  ) {
+  void _showMessageDetail(String title, String body, String date) {
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
+      builder: (dialogContext) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -152,7 +301,8 @@ class AdminMessagesScreen extends StatelessWidget {
           ],
         ),
         content: SingleChildScrollView(
-          child: Text(
+          // 💡 長押しで文章をコピーできるようにする（お問い合わせ番号などを写しやすくする）
+          child: SelectableText(
             body,
             style: const TextStyle(
               fontSize: 14,
@@ -163,7 +313,7 @@ class AdminMessagesScreen extends StatelessWidget {
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context),
+            onPressed: () => Navigator.pop(dialogContext),
             child: const Text(
               '閉じる',
               style: TextStyle(fontWeight: FontWeight.bold),

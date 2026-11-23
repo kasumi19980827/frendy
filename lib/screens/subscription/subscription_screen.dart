@@ -1,31 +1,121 @@
-import 'package:flutter/material.dart';
+import 'dart:async';
+import 'dart:io' show Platform;
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:matching_app/constants/app_colors.dart';
 import 'package:matching_app/screens/settings/privacy_policy_screen.dart';
 import 'package:matching_app/screens/settings/terms_of_service_screen.dart';
 import 'package:matching_app/screens/settings/tokushoho_screen.dart';
+import 'package:url_launcher/url_launcher.dart';
 
-// ============================================================
-// 🔴🔴🔴 重要な警告（本番リリース前に必ず対応すること） 🔴🔴🔴
-// ------------------------------------------------------------
-// このファイルの _updatePlan() は、実際の決済（Apple In-App Purchase /
-// Google Play Billing）を一切経由せず、Firestoreの 'plan' フィールドを
-// 直接書き換えているだけです。
+// ============================================================================
+// メンバーシッププラン（サブスクリプション管理）
 //
-// つまり現状は「ボタンを押すだけで、お金を払わずに誰でもプレミアムプランに
-// なれてしまう」状態であり、収益化の仕組みとして機能していません。
+// 💡 現在の状態
+//  ・plan は「サーバーだけが書き換えられる」項目（セキュリティルールで保護済み）。
+//    以前のようにアプリから plan を書き換えて、お金を払わずに有料プランに
+//    なることはできない。
+//  ・本物の課金（App Store / Google Play）はまだ組み込んでいない。
+//    そのため「〇〇プランにする」ボタンは、今は「準備中」の案内を出すだけ。
 //
-// 本番リリース前に、最低限以下の対応が必要です：
-//   1. `in_app_purchase` パッケージを導入し、App Store Connect /
-//      Google Play Console で実際のサブスクリプション商品を登録する
-//   2. 購入完了後、Cloud Functions等のサーバー側でレシート（購入証明）を
-//      検証してから、'plan' フィールドを更新する
-//      （クライアントから直接 'plan' を書き換えられる今のFirestoreルールも
-//        あわせて見直し、クライアントからの直接書き込みは禁止すべき）
-//   3. 上記が完了するまでは、このプラン変更ボタンは「テスト用」の
-//      仮実装であることを明確に認識しておくこと
-// ============================================================
+// 💡 本物の課金を組み込むときの流れ（次の作業）
+//  1. App Store Connect / Google Play Console で4つの商品を登録
+//  2. in_app_purchase パッケージで購入
+//  3. Cloud Functions でレシート（購入証明）を検証し、サーバーが plan を書き換える
+//  4. この画面は users/{自分} を監視しているので、plan が変われば自動で表示が変わる
+//
+// 💡 5万人規模：この画面が読むのは自分のドキュメント1件だけ（変化があったときだけ通知）
+// ============================================================================
+
+// ⚠️ 本物の課金を組み込んだら true にする
+const bool _kPurchaseAvailable = false;
+
+class _Feature {
+  const _Feature(this.title, this.desc);
+  final String title;
+  final String desc;
+}
+
+class _Plan {
+  const _Plan({
+    required this.id,
+    required this.name,
+    required this.price,
+    required this.color,
+    required this.features,
+    this.isPopular = false,
+  });
+  final String id;
+  final String name;
+  final int price; // 税込・月額（円）
+  final Color color;
+  final List<_Feature> features;
+  final bool isPopular;
+}
+
+// 💡 料金プラン（2026年11月改定）
+//    サーバー側の判定（index.ts の TALK_LIMITS と LOCKED_PLANS）、
+//    特商法表記・Frendyの説明・ヘルプと必ずそろえること
+const List<_Plan> _plans = [
+  _Plan(
+    id: 'free',
+    name: 'フリー',
+    price: 0,
+    color: Colors.grey,
+    features: [_Feature('メッセージ最大5人／月', '最大5人の気になる相手と会話を始めることができます。')],
+  ),
+  _Plan(
+    id: 'light',
+    name: 'ライト',
+    price: 250,
+    color: Color(0xFFFF9800),
+    features: [
+      _Feature('メッセージ最大15人／月', '最大15人の気になる相手と会話を始めることができます。'),
+      _Feature('足跡の表示', 'あなたのプロフィールを見た人がわかります。'),
+      _Feature('いいねされた人を見れる', 'あなたにいいねしたお相手を確認できます。'),
+    ],
+  ),
+  _Plan(
+    id: 'standard',
+    name: 'スタンダード',
+    price: 500,
+    color: Color(0xFF4CAF50),
+    isPopular: true,
+    features: [
+      _Feature('メッセージ無制限', '人数の上限なく、気になる相手と会話を始められます。'),
+      _Feature('足跡の表示', 'あなたのプロフィールを見た人がわかります。'),
+      _Feature('いいねされた人を見れる', 'あなたにいいねしたお相手を確認できます。'),
+    ],
+  ),
+  _Plan(
+    id: 'premium',
+    name: 'プレミアム',
+    price: 980,
+    color: AppColors.point,
+    features: [
+      _Feature('メッセージ無制限', '人数の上限なく、気になる相手と会話を始められます。'),
+      _Feature('足跡の表示', 'あなたのプロフィールを見た人がわかります。'),
+      _Feature('いいねされた人を見れる', 'あなたにいいねしたお相手を確認できます。'),
+      _Feature('プロフィール優先表示', '「探す」の検索結果で、あなたのプロフィールが上位に表示されます。'),
+    ],
+  ),
+];
+
+int _indexOfPlan(String id) {
+  final i = _plans.indexWhere((p) => p.id == id);
+  return i >= 0 ? i : 0;
+}
+
+// 各ストアのサブスクリプション管理画面（解約・プラン変更はここで行う）
+final Uri _kAppleSubscriptionsUrl = Uri.parse(
+  'https://apps.apple.com/account/subscriptions',
+);
+final Uri _kGoogleSubscriptionsUrl = Uri.parse(
+  'https://play.google.com/store/account/subscriptions',
+);
 
 class SubscriptionScreen extends StatefulWidget {
   const SubscriptionScreen({super.key});
@@ -35,132 +125,166 @@ class SubscriptionScreen extends StatefulWidget {
 }
 
 class _SubscriptionScreenState extends State<SubscriptionScreen> {
-  static const Duration _networkTimeout = Duration(seconds: 20);
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _planSub;
 
   int _selectedPlanIndex = 2;
-  final List<String> _planIds = ['free', 'light', 'standard', 'premium'];
-
   String _currentPlan = 'free';
   bool _isLoadingPlan = true;
-  bool _isUpdatingPlan = false;
+  bool _initialSelectionDone = false;
 
   @override
   void initState() {
     super.initState();
-    _loadCurrentPlan();
-  }
-
-  Future<void> _loadCurrentPlan() async {
-    final String? uid = FirebaseAuth.instance.currentUser?.uid;
-    if (uid == null) {
-      if (mounted) setState(() => _isLoadingPlan = false);
-      return;
-    }
-    try {
-      final doc = await FirebaseFirestore.instance
-          .collection('users')
-          .doc(uid)
-          .get()
-          .timeout(_networkTimeout);
-      final String plan = doc.data()?['plan'] ?? 'free';
-      if (mounted) {
-        setState(() {
-          _currentPlan = plan;
-          final int idx = _planIds.indexOf(plan);
-          _selectedPlanIndex = idx >= 0 ? idx : 0;
-          _isLoadingPlan = false;
-        });
-      }
-    } catch (e) {
-      debugPrint('プラン取得エラー: $e');
-      if (mounted) setState(() => _isLoadingPlan = false);
-    }
-  }
-
-  Future<void> _updatePlan(String newPlanId, String newPlanName) async {
-    final String? uid = FirebaseAuth.instance.currentUser?.uid;
-    if (uid == null) return;
-
-    setState(() => _isUpdatingPlan = true);
-    try {
-      await FirebaseFirestore.instance
-          .collection('users')
-          .doc(uid)
-          .update({'plan': newPlanId})
-          .timeout(_networkTimeout);
-      if (mounted) {
-        setState(() {
-          _currentPlan = newPlanId;
-          _isUpdatingPlan = false;
-        });
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('$newPlanNameプランに変更しました'),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-      }
-    } catch (e) {
-      debugPrint('プラン更新エラー: $e');
-      if (mounted) {
-        setState(() => _isUpdatingPlan = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('プランの変更に失敗しました。もう一度お試しください。'),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-      }
-    }
+    _listenPlan();
   }
 
   @override
+  void dispose() {
+    _planSub?.cancel();
+    super.dispose();
+  }
+
+  // 💡 自分のプランを監視する。購入後にサーバーが plan を書き換えると、自動で表示が変わる
+  void _listenPlan() {
+    final String? uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) {
+      _isLoadingPlan = false;
+      return;
+    }
+    _planSub = FirebaseFirestore.instance
+        .collection('users')
+        .doc(uid)
+        .snapshots()
+        .listen(
+          (snap) {
+            final raw = snap.data()?['plan'];
+            final plan = raw is String && _plans.any((p) => p.id == raw)
+                ? raw
+                : 'free';
+            if (!mounted) return;
+            setState(() {
+              _currentPlan = plan;
+              _isLoadingPlan = false;
+              // 最初の1回だけ、今のプランを選択状態にする
+              if (!_initialSelectionDone) {
+                _selectedPlanIndex = plan == 'free' ? 2 : _indexOfPlan(plan);
+                _initialSelectionDone = true;
+              }
+            });
+          },
+          onError: (Object e) {
+            debugPrint('プラン取得エラー: $e');
+            if (mounted) setState(() => _isLoadingPlan = false);
+          },
+        );
+  }
+
+  // ストアのサブスクリプション管理画面を開く（解約・プラン変更）
+  Future<void> _openStoreSubscriptions() async {
+    final Uri url = Platform.isIOS
+        ? _kAppleSubscriptionsUrl
+        : _kGoogleSubscriptionsUrl;
+    try {
+      final ok = await launchUrl(url, mode: LaunchMode.externalApplication);
+      if (!ok) throw Exception('launchUrl returned false');
+    } catch (e) {
+      debugPrint('サブスクリプション管理画面の起動エラー: $e');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            Platform.isIOS
+                ? '「設定」アプリ →「（あなたの名前）」→「サブスクリプション」から管理できます'
+                : 'Google Play ストア →「お支払いと定期購入」→「定期購入」から管理できます',
+          ),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
+  void _onPlanButtonPressed(_Plan selected) {
+    // 有料プランからフリーに戻す・別の有料プランに変える場合は、ストア側で行う
+    if (_currentPlan != 'free') {
+      _showStoreManageDialog(selected);
+      return;
+    }
+    if (!_kPurchaseAvailable) {
+      _showComingSoonDialog();
+      return;
+    }
+    // TODO: 本物の課金を組み込んだら、ここで購入処理を呼ぶ
+  }
+
+  void _showComingSoonDialog() {
+    showDialog(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text(
+          'ただいま準備中です',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+        content: Text(
+          kDebugMode
+              ? '有料プランの購入機能は準備中です。\n\n'
+                    '【開発者向け】テストするときは、Firebase コンソールの users → 自分のID → plan を '
+                    'light / standard / premium に書き換えてください。'
+              : '有料プランの購入機能は、ただいま準備中です。\n公開まで今しばらくお待ちください。',
+          style: const TextStyle(height: 1.5),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text(
+              '閉じる',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showStoreManageDialog(_Plan selected) {
+    final String message = selected.id == 'free'
+        ? 'フリープランに戻すには、${Platform.isIOS ? 'App Store' : 'Google Play'} のサブスクリプション管理画面で解約してください。\n解約後も、契約期間の終了までは今のプランをご利用いただけます。'
+        : 'プランの変更は、${Platform.isIOS ? 'App Store' : 'Google Play'} のサブスクリプション管理画面から行えます。';
+
+    showDialog(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text(
+          'サブスクリプションの管理',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+        content: Text(message, style: const TextStyle(height: 1.5)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('キャンセル', style: TextStyle(color: Colors.grey)),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(dialogContext);
+              _openStoreSubscriptions();
+            },
+            child: const Text(
+              '管理画面を開く',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _planNameOf(String id) => _plans[_indexOfPlan(id)].name;
+
+  @override
   Widget build(BuildContext context) {
-    final List<Map<String, dynamic>> plans = [
-      {
-        'id': 'free',
-        'name': 'フリー',
-        'price': '0',
-        'features': [
-          {'title': 'メッセージ最大5人／月', 'desc': '最大5人の気になる相手と会話を始めることができます。'},
-        ],
-        'color': Colors.grey,
-      },
-      {
-        'id': 'light',
-        'name': 'ライト',
-        'price': '250',
-        'features': [
-          {'title': 'メッセージ最大15人／月', 'desc': '最大15人の気になる相手と会話を始めることができます。'},
-          {'title': '足跡の表示', 'desc': 'あなたのプロフィールを見た人がわかります。'},
-        ],
-        'color': const Color(0xFFFF9800),
-      },
-      {
-        'id': 'standard',
-        'name': 'スタンダード',
-        'price': '500',
-        'features': [
-          {'title': 'メッセージ無制限', 'desc': '気になる相手といつでも会話できます。'},
-          {'title': '足跡の表示', 'desc': 'あなたのプロフィールを見た人がわかります。'},
-          {'title': 'いいねされた人を見れる', 'desc': 'あなたにいいねしたお相手を確認できます。'},
-        ],
-        'color': const Color(0xFF4CAF50),
-        'isPopular': true,
-      },
-      {
-        'id': 'premium',
-        'name': 'プレミアム',
-        'price': '980',
-        'features': [
-          {'title': 'メッセージ無制限', 'desc': '気になる相手といつでも会話できます。'},
-          {'title': '足跡の表示', 'desc': 'あなたのプロフィールを見た人がわかります。'},
-          {'title': 'いいねされた人を見れる', 'desc': 'あなたにいいねしたお相手を確認できます。'},
-          {'title': 'プロフィール優先表示', 'desc': '相手の検索結果で上位に表示されます。'},
-        ],
-        'color': AppColors.point,
-      },
-    ];
+    final _Plan selected = _plans[_selectedPlanIndex];
 
     return Scaffold(
       backgroundColor: Colors.white,
@@ -174,12 +298,9 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
       ),
       body: _isLoadingPlan
           ? const Center(child: CircularProgressIndicator())
-          : SingleChildScrollView(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 16.0,
-                  vertical: 16.0,
-                ),
+          : SafeArea(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(16),
                 child: Column(
                   children: [
                     const Text(
@@ -193,141 +314,16 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
                     const SizedBox(height: 16),
 
                     Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: List.generate(plans.length, (index) {
-                        final plan = plans[index];
-                        final bool isSelected = _selectedPlanIndex == index;
-                        final Color planColor = plan['color'] as Color;
-
-                        return Expanded(
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 3.0,
-                            ),
-                            child: GestureDetector(
-                              onTap: () {
-                                setState(() {
-                                  _selectedPlanIndex = index;
-                                });
-                              },
-                              child: Stack(
-                                clipBehavior: Clip.none,
-                                children: [
-                                  Container(
-                                    margin: const EdgeInsets.only(top: 10),
-                                    padding: const EdgeInsets.symmetric(
-                                      vertical: 16,
-                                      horizontal: 2,
-                                    ),
-                                    width: double.infinity,
-                                    height: 90,
-                                    decoration: BoxDecoration(
-                                      color: isSelected
-                                          ? planColor.withOpacity(0.04)
-                                          : Colors.white,
-                                      borderRadius: BorderRadius.circular(12),
-                                      border: Border.all(
-                                        color: isSelected
-                                            ? planColor
-                                            : Colors.grey[300]!,
-                                        width: isSelected ? 2.5 : 1,
-                                      ),
-                                      boxShadow: isSelected
-                                          ? [
-                                              BoxShadow(
-                                                color: planColor.withOpacity(
-                                                  0.1,
-                                                ),
-                                                blurRadius: 6,
-                                                offset: const Offset(0, 3),
-                                              ),
-                                            ]
-                                          : null,
-                                    ),
-                                    child: Column(
-                                      mainAxisSize: MainAxisSize.max,
-                                      mainAxisAlignment:
-                                          MainAxisAlignment.center,
-                                      children: [
-                                        Text(
-                                          plan['name'],
-                                          style: TextStyle(
-                                            fontSize: 12,
-                                            fontWeight: FontWeight.bold,
-                                            color: isSelected
-                                                ? planColor
-                                                : Colors.black87,
-                                          ),
-                                        ),
-                                        const SizedBox(height: 8),
-                                        FittedBox(
-                                          fit: BoxFit.scaleDown,
-                                          child: Row(
-                                            crossAxisAlignment:
-                                                CrossAxisAlignment.baseline,
-                                            textBaseline:
-                                                TextBaseline.alphabetic,
-                                            children: [
-                                              Text(
-                                                '¥${plan['price']}',
-                                                style: const TextStyle(
-                                                  fontSize: 15,
-                                                  color: Colors.black87,
-                                                ),
-                                              ),
-                                              const Text(
-                                                '/月',
-                                                style: TextStyle(
-                                                  fontSize: 9,
-                                                  color: Colors.black54,
-                                                ),
-                                              ),
-                                            ],
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                  if (plan['isPopular'] == true)
-                                    Positioned(
-                                      top: -2,
-                                      left: 0,
-                                      right: 0,
-                                      child: Center(
-                                        child: Container(
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 6,
-                                            vertical: 2,
-                                          ),
-                                          decoration: BoxDecoration(
-                                            color: planColor,
-                                            borderRadius: BorderRadius.circular(
-                                              6,
-                                            ),
-                                          ),
-                                          child: const Text(
-                                            '人気',
-                                            style: TextStyle(
-                                              color: Colors.white,
-                                              fontSize: 8,
-                                              fontWeight: FontWeight.bold,
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        );
-                      }),
+                      children: [
+                        for (var i = 0; i < _plans.length; i++)
+                          Expanded(child: _buildPlanCard(i)),
+                      ],
                     ),
 
                     const SizedBox(height: 32),
 
                     Text(
-                      '${plans[_selectedPlanIndex]['name']}プランの機能',
+                      '${selected.name}プランの機能',
                       style: const TextStyle(
                         fontWeight: FontWeight.bold,
                         fontSize: 16,
@@ -335,176 +331,40 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
                       ),
                     ),
                     const SizedBox(height: 16),
-
-                    ...(plans[_selectedPlanIndex]['features'] as List).map((
-                      feat,
-                    ) {
-                      return _buildFeatureItem(
+                    for (final f in selected.features)
+                      _buildFeatureItem(
                         Icons.check_circle,
-                        feat['title'],
-                        feat['desc'],
-                        plans[_selectedPlanIndex]['color'],
-                      );
-                    }),
+                        f.title,
+                        f.desc,
+                        selected.color,
+                      ),
 
                     const SizedBox(height: 24),
-
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(
-                        color: Colors.grey[50],
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(color: Colors.grey[200]!),
-                      ),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          const Text(
-                            '現在のステータス:',
-                            style: TextStyle(
-                              fontSize: 14,
-                              color: Colors.black54,
-                            ),
-                          ),
-                          Text(
-                            _currentPlan == 'free'
-                                ? 'フリー会員'
-                                : '${_planNameOf(plans, _currentPlan)}プラン契約中',
-                            style: const TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.black87,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-
+                    _buildStatusBox(),
                     const SizedBox(height: 24),
+                    _buildActionButton(selected),
 
-                    // --- アクションボタン（注意書きより先に、目立つ位置に配置） ---
-                    SizedBox(
-                      width: double.infinity,
-                      height: 56,
-                      child: Builder(
-                        builder: (context) {
-                          final String selectedId =
-                              plans[_selectedPlanIndex]['id'] as String;
-                          final String selectedName =
-                              plans[_selectedPlanIndex]['name'] as String;
-                          final bool isCurrent = selectedId == _currentPlan;
-
-                          return ElevatedButton(
-                            onPressed: (_isUpdatingPlan || isCurrent)
-                                ? null
-                                : () => _updatePlan(selectedId, selectedName),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: isCurrent
-                                  ? Colors.grey[400]
-                                  : plans[_selectedPlanIndex]['color'],
-                              foregroundColor: Colors.white,
-                              elevation: 2,
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(28),
-                              ),
-                            ),
-                            child: _isUpdatingPlan
-                                ? const SizedBox(
-                                    width: 22,
-                                    height: 22,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2.5,
-                                      color: Colors.white,
-                                    ),
-                                  )
-                                : Text(
-                                    isCurrent
-                                        ? '現在のプランです'
-                                        : (selectedId == 'free'
-                                              ? 'フリープランを利用する'
-                                              : '$selectedNameプランに変更する'),
-                                    style: const TextStyle(
-                                      fontSize: 16,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                          );
-                        },
+                    // 有料プランの人には、解約・変更の入り口を常に出しておく
+                    if (_currentPlan != 'free') ...[
+                      const SizedBox(height: 12),
+                      TextButton.icon(
+                        onPressed: _openStoreSubscriptions,
+                        icon: const Icon(Icons.open_in_new, size: 16),
+                        label: const Text('サブスクリプションを管理・解約する'),
                       ),
-                    ),
+                    ],
 
                     const SizedBox(height: 20),
 
-                    // 💡 Appleガイドライン3.1.2対応：サブスクリプションの自動更新・
-                    //    解約方法について、画面上に明記する（フッターのリンクだけに頼らない）
-                    if (plans[_selectedPlanIndex]['id'] != 'free')
-                      Container(
-                        width: double.infinity,
-                        padding: const EdgeInsets.all(16),
-                        decoration: BoxDecoration(
-                          color: Colors.blue.withOpacity(0.05),
-                          borderRadius: BorderRadius.circular(16),
-                        ),
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Icon(
-                              Icons.info_outline,
-                              size: 18,
-                              color: Colors.blueGrey,
-                            ),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: Text(
-                                '${plans[_selectedPlanIndex]['name']}プランは月額¥${plans[_selectedPlanIndex]['price']}（税込）の自動更新サブスクリプションです。'
-                                '契約期間は1ヶ月で、期間終了の24時間前までに解約しない限り、自動的に更新され、更新料が請求されます。'
-                                '解約は、ご利用の端末のApp StoreまたはGoogle Playのサブスクリプション管理画面からいつでも行えます。',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  height: 1.6,
-                                  color: Colors.grey[800],
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
+                    // 💡 Appleガイドライン3.1.2・特商法対応：自動更新・解約方法を画面上に明記する
+                    if (selected.id != 'free') _buildRenewalNotice(selected),
+
+                    const SizedBox(height: 16),
+                    // 💡 解約の手順は、プランに関係なく常に表示しておく
+                    _buildCancelGuide(),
 
                     const SizedBox(height: 40),
-
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        _buildFooterLink('利用規約', () {
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (context) =>
-                                  const TermsOfServiceScreen(),
-                            ),
-                          );
-                        }),
-                        _buildFooterDivider(),
-                        _buildFooterLink('プライバシーポリシー', () {
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (context) => const PrivacyPolicyScreen(),
-                            ),
-                          );
-                        }),
-                        _buildFooterDivider(),
-                        _buildFooterLink('特商法表記', () {
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (context) => const TokushohoScreen(),
-                            ),
-                          );
-                        }),
-                      ],
-                    ),
+                    _buildFooter(),
                     const SizedBox(height: 16),
                   ],
                 ),
@@ -513,12 +373,319 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
     );
   }
 
-  String _planNameOf(List<Map<String, dynamic>> plans, String planId) {
-    final match = plans.firstWhere(
-      (p) => p['id'] == planId,
-      orElse: () => {'name': '不明'},
+  Widget _buildPlanCard(int index) {
+    final plan = _plans[index];
+    final bool isSelected = _selectedPlanIndex == index;
+    final bool isCurrent = plan.id == _currentPlan;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 3.0),
+      child: GestureDetector(
+        onTap: () => setState(() => _selectedPlanIndex = index),
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            Container(
+              margin: const EdgeInsets.only(top: 10),
+              padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 2),
+              width: double.infinity,
+              height: 90,
+              decoration: BoxDecoration(
+                color: isSelected
+                    ? plan.color.withValues(alpha: 0.04)
+                    : Colors.white,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: isSelected ? plan.color : Colors.grey[300]!,
+                  width: isSelected ? 2.5 : 1,
+                ),
+                boxShadow: isSelected
+                    ? [
+                        BoxShadow(
+                          color: plan.color.withValues(alpha: 0.1),
+                          blurRadius: 6,
+                          offset: const Offset(0, 3),
+                        ),
+                      ]
+                    : null,
+              ),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Text(
+                      plan.name,
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: isSelected ? plan.color : Colors.black87,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.baseline,
+                      textBaseline: TextBaseline.alphabetic,
+                      children: [
+                        Text(
+                          '¥${plan.price}',
+                          style: const TextStyle(
+                            fontSize: 15,
+                            color: Colors.black87,
+                          ),
+                        ),
+                        const Text(
+                          '/月',
+                          style: TextStyle(fontSize: 9, color: Colors.black54),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (plan.isPopular || isCurrent)
+              Positioned(
+                top: -2,
+                left: 0,
+                right: 0,
+                child: Center(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 2,
+                    ),
+                    decoration: BoxDecoration(
+                      color: isCurrent ? Colors.black87 : plan.color,
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Text(
+                      isCurrent ? '利用中' : '人気',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 8,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
     );
-    return match['name'] as String;
+  }
+
+  Widget _buildStatusBox() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.grey[50],
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.grey[200]!),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          const Text(
+            '現在のステータス:',
+            style: TextStyle(fontSize: 14, color: Colors.black54),
+          ),
+          Flexible(
+            child: Text(
+              _currentPlan == 'free'
+                  ? 'フリー会員'
+                  : '${_planNameOf(_currentPlan)}プラン契約中',
+              textAlign: TextAlign.right,
+              style: const TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.bold,
+                color: Colors.black87,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildActionButton(_Plan selected) {
+    final bool isCurrent = selected.id == _currentPlan;
+
+    final String label;
+    if (isCurrent) {
+      label = '現在のプランです';
+    } else if (_currentPlan != 'free') {
+      label = selected.id == 'free'
+          ? 'フリープランに戻す（解約）'
+          : '${selected.name}プランに変更する';
+    } else {
+      label = '${selected.name}プランにする';
+    }
+
+    return SizedBox(
+      width: double.infinity,
+      height: 56,
+      child: ElevatedButton(
+        onPressed: isCurrent ? null : () => _onPlanButtonPressed(selected),
+        style: ElevatedButton.styleFrom(
+          backgroundColor: selected.id == 'free'
+              ? Colors.grey[600]
+              : selected.color,
+          foregroundColor: Colors.white,
+          disabledBackgroundColor: Colors.grey[400],
+          disabledForegroundColor: Colors.white,
+          elevation: 2,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(28),
+          ),
+        ),
+        child: Text(
+          label,
+          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildRenewalNotice(_Plan selected) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.blue.withValues(alpha: 0.05),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.info_outline, size: 18, color: Colors.blueGrey),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              '${selected.name}プランは月額¥${selected.price}（税込）の自動更新サブスクリプションです。'
+              '契約期間は1ヶ月で、期間終了の24時間前までに解約しない限り、自動的に更新され、更新料が請求されます。'
+              '解約は、ご利用の端末のApp StoreまたはGoogle Playのサブスクリプション管理画面からいつでも行えます。'
+              'アプリの削除や退会だけでは解約されません。',
+              style: TextStyle(
+                fontSize: 12,
+                height: 1.6,
+                color: Colors.grey[800],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // 解約方法の案内（iPhone と Android の両方の手順を載せる）
+  Widget _buildCancelGuide() {
+    Widget steps(String title, List<String> items) {
+      return Padding(
+        padding: const EdgeInsets.only(top: 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              title,
+              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 4),
+            for (var i = 0; i < items.length; i++)
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Text(
+                  '${i + 1}. ${items[i]}',
+                  style: TextStyle(
+                    fontSize: 12,
+                    height: 1.6,
+                    color: Colors.grey[800],
+                  ),
+                ),
+              ),
+          ],
+        ),
+      );
+    }
+
+    final iphone = steps('iPhone の場合', const [
+      '「設定」アプリを開く',
+      'いちばん上の「自分の名前」をタップ',
+      '「サブスクリプション」をタップ',
+      '「frendy」を選び、「サブスクリプションをキャンセルする」をタップ',
+    ]);
+    final android = steps('Android の場合', const [
+      '「Google Play ストア」アプリを開く',
+      '右上のプロフィールアイコンをタップ',
+      '「お支払いと定期購入」→「定期購入」をタップ',
+      '「frendy」を選び、「定期購入を解約」をタップ',
+    ]);
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.grey[50],
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.grey[200]!),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.help_outline, size: 18, color: Colors.blueGrey),
+              SizedBox(width: 8),
+              Text(
+                '解約の方法',
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'サブスクリプションは、アプリ内からは解約できません。ご利用の端末で、次の手順で解約してください。'
+            'アプリの削除や退会だけでは解約されませんのでご注意ください。',
+            style: TextStyle(
+              fontSize: 12,
+              height: 1.6,
+              color: Colors.grey[800],
+            ),
+          ),
+          // 使っている端末の手順を先に表示する
+          if (Platform.isIOS) ...[iphone, android] else ...[android, iphone],
+          const SizedBox(height: 8),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              onPressed: _openStoreSubscriptions,
+              icon: const Icon(Icons.open_in_new, size: 16),
+              label: Text(
+                Platform.isIOS ? 'App Store の管理画面を開く' : 'Google Play の管理画面を開く',
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFooter() {
+    return Wrap(
+      alignment: WrapAlignment.center,
+      children: [
+        _buildFooterLink('利用規約', const TermsOfServiceScreen()),
+        _buildFooterDivider(),
+        _buildFooterLink('プライバシーポリシー', const PrivacyPolicyScreen()),
+        _buildFooterDivider(),
+        _buildFooterLink('特商法表記', const TokushohoScreen()),
+      ],
+    );
   }
 
   Widget _buildFeatureItem(
@@ -563,9 +730,10 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
     );
   }
 
-  Widget _buildFooterLink(String text, VoidCallback onTap) {
+  Widget _buildFooterLink(String text, Widget screen) {
     return GestureDetector(
-      onTap: onTap,
+      onTap: () =>
+          Navigator.push(context, MaterialPageRoute(builder: (_) => screen)),
       child: Text(
         text,
         style: const TextStyle(

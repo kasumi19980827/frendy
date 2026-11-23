@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:matching_app/constants/app_colors.dart';
+import 'package:matching_app/screens/auth/identity_verification_screen.dart';
 import 'package:matching_app/screens/mypage/mypage_screen.dart';
 import 'package:matching_app/screens/talk/talk_screen.dart';
 
@@ -14,16 +16,22 @@ import 'package:matching_app/screens/talk/talk_screen.dart';
 //
 // chat_rooms/{小さいuid}_{大きいuid} のフィールド:
 //   users           : [uid, uid]
-//   lastMessage     : String
-//   lastMessageTime : Timestamp
-//   unreadCount     : { uid: int }
-//   messageCountBy  : { uid: int }        … Cloud Functions(onMessageCreated)が自動で数える
+//   lastMessage     : String              … Cloud Functions(onMessageCreated)が書き込む
+//   lastMessageTime : Timestamp           … 同上
+//   lastSenderId    : String              … 同上（最後に送った人）
+//   unreadCount     : { uid: int }        … 同上（0に戻すのは本人のアプリ）
+//   messageCountBy  : { uid: int }        … 同上（友達申請の条件判定用）
 //   hiddenAt        : { uid: Timestamp }  … 「トークを非表示」にした時刻（自分の分だけ）
+//   lastReadAt      : { uid: Timestamp }  … どこまで読んだか（既読表示用）
 //   blockedBy       : [uid]               … Cloud Functions(blockUser)が書き込む
+//
+// 💡 トーク一覧は年齢確認が済んだ人だけが読める（セキュリティルールでも確認）。
+//    最新メッセージの一部が表示されるため、年齢確認前に中身が見えないようにしている。
 // ============================================================================
 
 const Duration _kNetworkTimeout = Duration(seconds: 20);
 const int _kRoomPageSize = 30;
+const int _kMaxRooms = 600; // 一覧に読み込むトークの上限
 const int _kWhereInLimit = 30;
 const int _kRequiredMessages = 4; // 友達申請に必要な「お互いの送信数」
 const int _kPeerCacheMax = 500;
@@ -107,6 +115,7 @@ class _Room {
     required this.id,
     required this.peerId,
     required this.lastMessage,
+    required this.lastSenderId,
     required this.lastTime,
     required this.unreadCount,
     required this.myCount,
@@ -118,6 +127,7 @@ class _Room {
   final String id;
   final String peerId;
   final String lastMessage;
+  final String lastSenderId;
   final Timestamp? lastTime;
   final int unreadCount;
   final int myCount;
@@ -154,6 +164,9 @@ class _Room {
       id: doc.id,
       peerId: peerId,
       lastMessage: d['lastMessage'] is String ? d['lastMessage'] as String : '',
+      lastSenderId: d['lastSenderId'] is String
+          ? d['lastSenderId'] as String
+          : '',
       lastTime: d['lastMessageTime'] is Timestamp
           ? d['lastMessageTime'] as Timestamp
           : null,
@@ -182,11 +195,15 @@ class MessageScreen extends StatefulWidget {
 class _MessageScreenState extends State<MessageScreen> {
   late final String _myId;
   String _myName = '';
+  String _ageStatus =
+      'unsubmitted'; // unsubmitted / pending / verified / rejected
+  bool _profileLoaded = false;
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _mySub;
 
   // 💡 Streamは build の外で一度だけ作る（再描画のたびに再購読しない）
   Stream<QuerySnapshot<Map<String, dynamic>>>? _roomsStream;
   int _limit = _kRoomPageSize;
+  bool _loadMoreScheduled = false; // 「続きを読む」の二重実行を防ぐ
 
   // 相手プロフィールのキャッシュ（ページ単位でまとめて取得）
   final Map<String, _Peer> _peers = {};
@@ -203,12 +220,33 @@ class _MessageScreenState extends State<MessageScreen> {
     _myId = FirebaseAuth.instance.currentUser?.uid ?? '';
     if (_myId.isEmpty) return;
 
-    _mySub = _db.collection('users').doc(_myId).snapshots().listen((snap) {
-      final raw = snap.data()?['name'];
-      final name = raw is String ? raw : '';
-      if (mounted && name != _myName) setState(() => _myName = name);
-    }, onError: (Object e) => debugPrint('自分のプロフィール取得エラー: $e'));
-    _subscribeRooms();
+    _mySub = _db
+        .collection('users')
+        .doc(_myId)
+        .snapshots()
+        .listen(
+          (snap) {
+            final data = snap.data() ?? {};
+            final rawName = data['name'];
+            final rawAge = data['ageVerified'];
+            final name = rawName is String ? rawName : '';
+            final age = rawAge is String ? rawAge : 'unsubmitted';
+            if (!mounted) return;
+            if (name == _myName && age == _ageStatus && _profileLoaded) return;
+
+            setState(() {
+              _myName = name;
+              _ageStatus = age;
+              _profileLoaded = true;
+              // 💡 年齢確認が承認されたら、その時点でトーク一覧の読み込みを始める
+              if (age == 'verified' && _roomsStream == null) _subscribeRooms();
+            });
+          },
+          onError: (Object e) {
+            debugPrint('自分のプロフィール取得エラー: $e');
+            if (mounted) setState(() => _profileLoaded = true);
+          },
+        );
   }
 
   @override
@@ -227,11 +265,16 @@ class _MessageScreenState extends State<MessageScreen> {
         .snapshots();
   }
 
+  // 💡 一覧の末尾が表示されたら30件追加で読む。
+  //    描画中に何度呼ばれても、1回分しか増やさない
   void _loadMore() {
+    if (_loadMoreScheduled || _limit >= _kMaxRooms) return;
+    _loadMoreScheduled = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      _loadMoreScheduled = false;
       if (!mounted) return;
       setState(() {
-        _limit += _kRoomPageSize;
+        _limit = math.min(_limit + _kRoomPageSize, _kMaxRooms);
         _subscribeRooms();
       });
     });
@@ -298,9 +341,86 @@ class _MessageScreenState extends State<MessageScreen> {
         centerTitle: true,
         elevation: 0,
       ),
-      body: _myId.isEmpty
-          ? const Center(child: Text('ログインが必要です'))
-          : _buildRoomList(),
+      body: _buildBody(),
+    );
+  }
+
+  Widget _buildBody() {
+    if (_myId.isEmpty) return const Center(child: Text('ログインが必要です'));
+    if (!_profileLoaded)
+      return const Center(child: CircularProgressIndicator());
+    if (_ageStatus != 'verified') return _buildVerificationPrompt();
+    return _buildRoomList();
+  }
+
+  // 年齢確認が済んでいないときの案内
+  Widget _buildVerificationPrompt() {
+    String message = '安心・安全な友達づくりのため、トークの利用には年齢確認が必要です。';
+    String btnText = '今すぐ年齢確認をする';
+    if (_ageStatus == 'pending') {
+      message = 'ただいま身分証を確認中です。\n完了までしばらくお待ちください。(通常数分〜24時間以内)';
+      btnText = '確認状況を見る';
+    } else if (_ageStatus == 'rejected') {
+      message = '提出いただいた身分証が非承認となりました。\n内容をご確認の上、再提出をお願いします。';
+      btnText = '身分証を再提出する';
+    }
+
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(
+              Icons.gpp_maybe_rounded,
+              size: 56,
+              color: Colors.blueAccent,
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              '年齢確認が必要です',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                fontSize: 13,
+                color: Colors.black54,
+                height: 1.5,
+              ),
+            ),
+            const SizedBox(height: 24),
+            SizedBox(
+              width: double.infinity,
+              height: 48,
+              child: ElevatedButton(
+                onPressed: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => const IdentityVerificationScreen(),
+                  ),
+                ),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.blueAccent,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(24),
+                  ),
+                  elevation: 0,
+                ),
+                child: Text(
+                  btnText,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -319,7 +439,7 @@ class _MessageScreenState extends State<MessageScreen> {
         }
 
         final rawDocs = snapshot.data!.docs;
-        final bool hasMore = rawDocs.length >= _limit;
+        final bool hasMore = rawDocs.length >= _limit && _limit < _kMaxRooms;
 
         final rooms = rawDocs
             .map((d) => _Room.fromDoc(d, _myId))
@@ -388,13 +508,20 @@ class _MessageScreenState extends State<MessageScreen> {
   }
 
   Widget _buildRoomTile(_Room room, _Peer peer) {
+    final String preview = room.lastMessage.isEmpty
+        ? 'メッセージはありません'
+        : (room.lastSenderId == _myId
+              ? 'あなた: ${room.lastMessage}'
+              : room.lastMessage);
+
     return ListTile(
       contentPadding: const EdgeInsets.only(left: 16, right: 8),
       leading: CircleAvatar(
         radius: 28,
         backgroundColor: Colors.grey[200],
+        // 💡 一度読んだアイコンは端末に保存し、次回からダウンロードしない
         backgroundImage: peer.imageUrl.isNotEmpty
-            ? ResizeImage(NetworkImage(peer.imageUrl), width: 168)
+            ? ResizeImage(CachedNetworkImageProvider(peer.imageUrl), width: 168)
             : null,
         onBackgroundImageError: peer.imageUrl.isNotEmpty ? (_, __) {} : null,
         child: peer.imageUrl.isEmpty
@@ -406,11 +533,7 @@ class _MessageScreenState extends State<MessageScreen> {
         style: const TextStyle(fontWeight: FontWeight.bold),
         overflow: TextOverflow.ellipsis,
       ),
-      subtitle: Text(
-        room.lastMessage.isEmpty ? 'メッセージはありません' : room.lastMessage,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-      ),
+      subtitle: Text(preview, maxLines: 1, overflow: TextOverflow.ellipsis),
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [

@@ -2,13 +2,17 @@
 // 他人のデータを書き換える操作と、課金プランで制限する読み取りはすべてここで行う。
 import { randomBytes } from "crypto";
 import { initializeApp } from "firebase-admin/app";
+import { getAuth } from "firebase-admin/auth";
 import {
   DocumentSnapshot,
+  FieldPath,
   FieldValue,
   getFirestore,
+  QueryDocumentSnapshot,
   Timestamp,
 } from "firebase-admin/firestore";
-import { setGlobalOptions } from "firebase-functions/v2";
+import { getStorage } from "firebase-admin/storage";
+import { logger, setGlobalOptions } from "firebase-functions/v2";
 import { onDocumentCreated } from "firebase-functions/v2/firestore";
 import { CallableRequest, HttpsError, onCall } from "firebase-functions/v2/https";
 
@@ -26,8 +30,13 @@ const REQUIRED_MESSAGES = 4; // 友達申請に必要な「お互いの送信数
 const FOOTPRINT_THROTTLE_MS = 10 * 60 * 1000; // 同じ相手への足跡は10分に1回まで更新
 
 // プランごとに「モザイクにする」対象
+// 💡 料金プラン（2026年11月改定）
+//   free     … 0円   ：トーク開始 月5人。足跡・いいねはモザイク
+//   light    … 250円 ：トーク開始 月15人。足跡・いいねした人を見られる
+//   standard … 500円 ：トーク開始 無制限。足跡・いいね
+//   premium  … 980円 ：standard ＋ 検索でプロフィール優先表示
 const LOCKED_PLANS: Record<"likedBy" | "footprints", string[]> = {
-  likedBy: ["free", "light"],
+  likedBy: ["free"],
   footprints: ["free"],
 };
 
@@ -185,23 +194,104 @@ export const sendFriendRequest = onCall(OPTS, async (req) => {
 });
 
 // ---------------------------------------------------------------------------
-// メッセージ送信数のカウント（友達申請の条件判定に使う）
-// アプリ側でメッセージを数えるために全件を読み込むのをやめ、ここで1件ずつ加算する。
-// ※ トリガーはまれに2回実行されることがあるため、厳密な件数ではなく「4通以上か」の判定用
+// メッセージが送られたときの処理（トークルームの情報をサーバーで更新する）
+//
+// ・lastMessage / lastMessageTime … トーク一覧に表示する最新メッセージ
+// ・unreadCount.{相手}            … 相手の未読数を +1
+// ・messageCountBy.{送信者}       … 友達申請の条件（お互い4通以上）の判定用
+//
+// 💡 以前はアプリがこれらを書き込んでいたため、改造アプリで
+//    「相手の未読数を999にする」「送信数を水増しする」などができた。
+//    サーバーで書き込むことで、改ざんできなくなる。
+// ※ トリガーはまれに2回実行されることがあるため、件数は厳密ではない（判定用には十分）
 // ---------------------------------------------------------------------------
+const LAST_MESSAGE_PREVIEW_LENGTH = 100;
+
+// ---------------------------------------------------------------------------
+// 限定バッジ：メッセージを送った「人数」に応じてプレゼント
+//   5人 → 銀バッジ（silver）／10人 → 金バッジ（gold）
+// 💡 人数・バッジはサーバーだけが書き込む（ルールでアプリからの書き換えを禁止）。
+//    users/{uid}/messaged_peers/{相手} に「送ったことがある印」を1件だけ作り、
+//    印が新しくできたときだけ人数を +1 する（トリガーが2回動いても二重に数えない）
+// ---------------------------------------------------------------------------
+const BADGE_RULES: { badge: "silver" | "gold"; peers: number }[] = [
+  { badge: "gold", peers: 10 },
+  { badge: "silver", peers: 5 },
+];
+const BADGE_RANK: Record<string, number> = { silver: 1, gold: 2 };
+
+function badgeFor(count: number): "silver" | "gold" | null {
+  for (const rule of BADGE_RULES) if (count >= rule.peers) return rule.badge;
+  return null;
+}
+
 export const onMessageCreated = onDocumentCreated(
   "chat_rooms/{roomId}/messages/{messageId}",
   async (event) => {
-    const senderId = event.data?.get("senderId");
+    const msg = event.data;
+    if (!msg) return;
+
+    const senderId = msg.get("senderId");
     if (typeof senderId !== "string" || !UID_RE.test(senderId)) return;
 
-    await db
-      .collection("chat_rooms")
-      .doc(event.params.roomId)
-      .set(
-        { messageCountBy: { [senderId]: FieldValue.increment(1) } },
-        { merge: true },
-      );
+    const members = event.params.roomId.split("_");
+    if (members.length !== 2 || !members.includes(senderId)) return;
+    const peerId = members[0] === senderId ? members[1] : members[0];
+
+    const rawText = msg.get("text");
+    const preview =
+      typeof rawText === "string" ? rawText.slice(0, LAST_MESSAGE_PREVIEW_LENGTH) : "";
+    const createdAt = msg.get("createdAt");
+    const sentAt = createdAt instanceof Timestamp ? createdAt : Timestamp.now();
+
+    const roomDoc = db.collection("chat_rooms").doc(event.params.roomId);
+
+    const senderDoc = userRef(senderId);
+    const markerDoc = sub(senderId, "messaged_peers", peerId);
+
+    await db.runTransaction(async (tx) => {
+      // 💡 トランザクションでは「読む」をすべて先に行う
+      const [room, marker, sender] = await Promise.all([
+        tx.get(roomDoc),
+        tx.get(markerDoc),
+        tx.get(senderDoc),
+      ]);
+      if (!room.exists) return; // 退会などでルームが消えている
+
+      // --- 限定バッジ：この相手に初めてメッセージを送ったときだけ人数を数える ---
+      if (!marker.exists && sender.exists) {
+        const prev = sender.get("messagedPeersCount");
+        const count = (typeof prev === "number" ? prev : 0) + 1;
+        const userUpdate: Record<string, unknown> = { messagedPeersCount: count };
+
+        const newBadge = badgeFor(count);
+        const currentBadge = sender.get("badge");
+        const currentRank = typeof currentBadge === "string" ? BADGE_RANK[currentBadge] ?? 0 : 0;
+        if (newBadge && BADGE_RANK[newBadge] > currentRank) {
+          userUpdate.badge = newBadge;
+          userUpdate.badgeAwardedAt = FieldValue.serverTimestamp();
+        }
+
+        // peerId は、相手が退会したときに印を探して消すために入れておく
+        tx.set(markerDoc, { peerId, createdAt: FieldValue.serverTimestamp() });
+        tx.set(senderDoc, userUpdate, { merge: true });
+      }
+
+      const update: Record<string, unknown> = {
+        messageCountBy: { [senderId]: FieldValue.increment(1) },
+        unreadCount: { [peerId]: FieldValue.increment(1) },
+      };
+
+      // 💡 トリガーの実行順が前後しても、古いメッセージで上書きしない
+      const current = room.get("lastMessageTime");
+      if (!(current instanceof Timestamp) || current.toMillis() <= sentAt.toMillis()) {
+        update.lastMessage = preview;
+        update.lastMessageTime = sentAt;
+        update.lastSenderId = senderId;
+      }
+
+      tx.set(roomDoc, update, { merge: true });
+    });
   },
 );
 
@@ -356,9 +446,338 @@ export const recordFootprint = onCall(OPTS, async (req) => {
   }
   await sub(peerId, "footprints", uid).set({
     createdAt: FieldValue.serverTimestamp(),
+    // 💡 退会時に「自分が他人に付けた足跡」を探して消せるよう、訪問者IDも保存する
+    visitorId: uid,
   });
   return { ok: true };
 });
+
+// ---------------------------------------------------------------------------
+// いいねの取り消し
+// ---------------------------------------------------------------------------
+export const unlikeUser = onCall(OPTS, async (req) => {
+  const uid = authUid(req);
+  const peerId = peerIdOf(req, uid);
+
+  const batch = db.batch();
+  batch.delete(sub(uid, "likes", peerId));
+  batch.delete(sub(peerId, "likedBy", uid));
+  await batch.commit();
+  return { ok: true };
+});
+
+// ---------------------------------------------------------------------------
+// ブロックの解除
+// ---------------------------------------------------------------------------
+export const unblockUser = onCall(OPTS, async (req) => {
+  const uid = authUid(req);
+  const peerId = peerIdOf(req, uid);
+
+  const [room, peer] = await db.getAll(roomRef(uid, peerId), userRef(peerId));
+  const batch = db.batch();
+  batch.delete(sub(uid, "blocks", peerId));
+  batch.delete(sub(peerId, "blockedBy", uid));
+  // 自分が付けたブロックの印だけ外す（相手からのブロックは残る）
+  if (room.exists) {
+    batch.update(room.ref, { blockedBy: FieldValue.arrayRemove(uid) });
+  }
+  // ⚠️ 移行用：古い方式（users ドキュメントの配列）のブロックも外す
+  batch.set(userRef(uid), { blocks: FieldValue.arrayRemove(peerId) }, { merge: true });
+  if (peer.exists) {
+    batch.update(peer.ref, { blockedBy: FieldValue.arrayRemove(uid) });
+  }
+  await batch.commit();
+  return { ok: true };
+});
+
+// ---------------------------------------------------------------------------
+// 新規トーク開始の月間上限
+// 💡 回数はクライアントから書き換えられない talk_quotas に保存する
+//    （以前は自分の users ドキュメントにあり、自分で0に戻せば上限を無視できた）
+// ---------------------------------------------------------------------------
+const TALK_LIMITS: Record<string, number> = { free: 5, light: 15 }; // それ以外のプランは無制限
+
+function talkLimitOf(plan: unknown): number | null {
+  const p = typeof plan === "string" ? plan : "free";
+  return p in TALK_LIMITS ? TALK_LIMITS[p] : null;
+}
+
+// 月の区切りは日本時間で判定する
+function currentPeriodJst(): string {
+  const d = new Date(Date.now() + 9 * 60 * 60 * 1000);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+const quotaRef = (uid: string) => db.collection("talk_quotas").doc(uid);
+
+function usedThisMonth(snap: DocumentSnapshot): number {
+  const count = snap.get("count");
+  return snap.get("period") === currentPeriodJst() && typeof count === "number" ? count : 0;
+}
+
+function isNameMissing(me: DocumentSnapshot): boolean {
+  const name = me.get("name");
+  if (typeof name !== "string") return true;
+  const t = name.trim();
+  return !t || t === "名前未設定" || t === "ユーザー";
+}
+
+// ---------------------------------------------------------------------------
+// プロフィール画面の表示に必要な状態をまとめて返す
+// （相手が自分をブロックしているかは「やり取りできるか」だけを返し、詳細は伝えない）
+// ---------------------------------------------------------------------------
+export const getProfileState = onCall(OPTS, async (req) => {
+  const uid = authUid(req);
+  const peerId = peerIdOf(req, uid);
+
+  const [me, peer, myBlock, peerBlock, room, quota] = await db.getAll(
+    userRef(uid),
+    userRef(peerId),
+    sub(uid, "blocks", peerId),
+    sub(peerId, "blocks", uid),
+    roomRef(uid, peerId),
+    quotaRef(uid),
+  );
+
+  return {
+    peerExists: peer.exists,
+    iBlocked: myBlock.exists,
+    canInteract: peer.exists && !myBlock.exists && !peerBlock.exists,
+    hasChatHistory: room.exists,
+    nameMissing: isNameMissing(me),
+    monthlyLimit: talkLimitOf(me.get("plan")), // null = 無制限
+    monthlyUsed: usedThisMonth(quota),
+  };
+});
+
+// ---------------------------------------------------------------------------
+// トーク開始（新しい相手なら月間の枠を1つ使い、トークルームを作る）
+// すでにルームがある相手なら、枠は使わない
+// ---------------------------------------------------------------------------
+export const startTalk = onCall(OPTS, async (req) => {
+  const uid = authUid(req);
+  const peerId = peerIdOf(req, uid);
+  const room = roomRef(uid, peerId);
+
+  const consumed = await db.runTransaction(async (tx) => {
+    const [me, peer, myBlock, peerBlock, roomSnap, quota] = await tx.getAll(
+      userRef(uid),
+      userRef(peerId),
+      sub(uid, "blocks", peerId),
+      sub(peerId, "blocks", uid),
+      room,
+      quotaRef(uid),
+    );
+
+    if (!peer.exists || myBlock.exists || peerBlock.exists) {
+      throw new HttpsError("failed-precondition", "このユーザーとはやり取りできません");
+    }
+    if (isNameMissing(me)) {
+      throw new HttpsError("failed-precondition", "先にプロフィールで名前を設定してください");
+    }
+    if (roomSnap.exists) return false; // 以前に話したことがある相手
+
+    const limit = talkLimitOf(me.get("plan"));
+    if (limit !== null) {
+      const used = usedThisMonth(quota);
+      if (used >= limit) {
+        throw new HttpsError(
+          "resource-exhausted",
+          `今月のトーク開始上限（${limit}人）に達しました`,
+          { limit },
+        );
+      }
+      tx.set(quotaRef(uid), { period: currentPeriodJst(), count: used + 1 });
+    }
+
+    tx.create(room, {
+      users: [uid, peerId].sort(),
+      lastMessage: "",
+      lastMessageTime: null, // メッセージが届くまでトーク一覧には出ない
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    return limit !== null;
+  });
+
+  return { roomId: room.id, consumed };
+});
+
+// ---------------------------------------------------------------------------
+// 退会（アカウントと関連データの完全削除）
+//
+// 他人のデータ（相手の友達一覧・いいね一覧など）から自分を消す処理は、
+// アプリからは権限上できないため、すべてサーバーで行う。
+// 途中で失敗しても、もう一度呼べば続きから削除できる（何度呼んでも安全）。
+// ---------------------------------------------------------------------------
+const STORAGE_BUCKET = "frendy-app-project.firebasestorage.app";
+const BATCH_LIMIT = 300;
+
+// 自分のサブコレクション → 相手側で対になるサブコレクション
+const PAIRED_COLLECTIONS: Array<[string, string]> = [
+  ["friends", "friends"],
+  ["likes", "likedBy"],
+  ["likedBy", "likes"],
+  ["blocks", "blockedBy"],
+  ["blockedBy", "blocks"],
+];
+
+// ⚠️ 移行用：旧方式で users ドキュメントの配列に入っている自分のID
+const LEGACY_ARRAY_FIELDS = ["friends", "likes", "likedBy", "blockedBy", "footprints"];
+
+// 1ステップが失敗しても、他の削除は続ける（失敗はログに残す）
+async function safeStep(name: string, uid: string, fn: () => Promise<void>) {
+  try {
+    await fn();
+  } catch (e) {
+    logger.error(`退会処理の一部に失敗: ${name}`, { uid, error: String(e) });
+  }
+}
+
+export const deleteAccount = onCall(
+  { ...OPTS, timeoutSeconds: 540, memory: "512MiB" },
+  async (req) => {
+    const uid = authUid(req);
+    const me = userRef(uid);
+    const writer = db.bulkWriter();
+
+    // 1. 相手側に残っている「自分」を消す（相手の友達一覧・いいねされた一覧など）
+    for (const [myCol, theirCol] of PAIRED_COLLECTIONS) {
+      await safeStep(`相手側の${theirCol}`, uid, async () => {
+        let last: QueryDocumentSnapshot | undefined;
+        for (;;) {
+          let q = me.collection(myCol).orderBy(FieldPath.documentId()).select().limit(BATCH_LIMIT);
+          if (last) q = q.startAfter(last);
+          const snap = await q.get();
+          if (snap.empty) break;
+          for (const doc of snap.docs) writer.delete(sub(doc.id, theirCol, uid));
+          last = snap.docs[snap.docs.length - 1];
+          await writer.flush();
+        }
+      });
+    }
+
+    // 2. 自分が他人に付けた足跡を消す
+    await safeStep("付けた足跡", uid, async () => {
+      for (let round = 0; round < 1000; round++) {
+        const snap = await db
+          .collectionGroup("footprints")
+          .where("visitorId", "==", uid)
+          .select()
+          .limit(BATCH_LIMIT)
+          .get();
+        if (snap.empty) break;
+        for (const doc of snap.docs) writer.delete(doc.ref);
+        await writer.flush();
+      }
+    });
+
+    // 2-2. 他人の「メッセージを送ったことがある相手」の印から自分を消す（限定バッジ用）
+    //      ※ 相手のバッジや人数はそのまま（一度もらったバッジは取り上げない）
+    await safeStep("メッセージ相手の印", uid, async () => {
+      for (let round = 0; round < 1000; round++) {
+        const snap = await db
+          .collectionGroup("messaged_peers")
+          .where("peerId", "==", uid)
+          .select()
+          .limit(BATCH_LIMIT)
+          .get();
+        if (snap.empty) break;
+        for (const doc of snap.docs) writer.delete(doc.ref);
+        await writer.flush();
+      }
+    });
+
+    // 3. ⚠️ 移行用：旧方式の配列から自分のIDを取り除く
+    for (const field of LEGACY_ARRAY_FIELDS) {
+      await safeStep(`旧配列 ${field}`, uid, async () => {
+        for (let round = 0; round < 1000; round++) {
+          const snap = await db
+            .collection("users")
+            .where(field, "array-contains", uid)
+            .select()
+            .limit(BATCH_LIMIT)
+            .get();
+          if (snap.empty) break;
+          for (const doc of snap.docs) {
+            writer.update(doc.ref, { [field]: FieldValue.arrayRemove(uid) });
+          }
+          await writer.flush();
+        }
+      });
+    }
+
+    // 4. 友達申請（送った・受け取った）を消す
+    for (const field of ["fromId", "toId"]) {
+      await safeStep(`友達申請 ${field}`, uid, async () => {
+        for (let round = 0; round < 1000; round++) {
+          const snap = await db
+            .collection("friend_requests")
+            .where(field, "==", uid)
+            .select()
+            .limit(BATCH_LIMIT)
+            .get();
+          if (snap.empty) break;
+          for (const doc of snap.docs) writer.delete(doc.ref);
+          await writer.flush();
+        }
+      });
+    }
+
+    // 5. 自分が参加しているトークルームを、メッセージごと消す
+    await safeStep("トークルーム", uid, async () => {
+      for (let round = 0; round < 1000; round++) {
+        const snap = await db
+          .collection("chat_rooms")
+          .where("users", "array-contains", uid)
+          .select()
+          .limit(50)
+          .get();
+        if (snap.empty) break;
+        for (const doc of snap.docs) await db.recursiveDelete(doc.ref);
+      }
+    });
+
+    // 6. 招待コード・連投制限の記録を消す
+    await safeStep("招待コード", uid, async () => {
+      const ownerRef = db.collection("invite_owners").doc(uid);
+      const owner = await ownerRef.get();
+      const code = owner.get("code");
+      if (typeof code === "string") writer.delete(db.collection("invite_codes").doc(code));
+      writer.delete(ownerRef);
+      writer.delete(db.collection("rate_limits").doc(uid));
+      writer.delete(quotaRef(uid));
+      // 💡 年齢確認の提出記録（画像の保存場所や確認用リンクを含む）も削除する。
+      //    プライバシーポリシーの「退会時に本人確認書類を削除する」と内容をそろえるため
+      writer.delete(db.collection("verification_requests").doc(uid));
+      await writer.flush();
+    });
+
+    await writer.close();
+
+    // 7. 画像（プロフィール写真・本人確認書類）を消す
+    const bucket = getStorage().bucket(STORAGE_BUCKET);
+    for (const prefix of [`user_images/${uid}/`, `user_verifications/${uid}/`]) {
+      await safeStep(`Storage ${prefix}`, uid, async () => {
+        await bucket.deleteFiles({ prefix, force: true });
+      });
+    }
+
+    // 8. 自分の users ドキュメントを、サブコレクション（友達・いいね等）ごと消す
+    //    ※ ここは必ず成功させる（失敗したらエラーを返し、アプリから再実行してもらう）
+    await db.recursiveDelete(me);
+
+    // 9. 最後にログインアカウントを消す
+    try {
+      await getAuth().deleteUser(uid);
+    } catch (e) {
+      if ((e as { code?: string }).code !== "auth/user-not-found") throw e;
+    }
+
+    // 通報（reports）とご意見（opinions）は、運営の対応記録として残す。
+    // ※ プライバシーポリシーに「通報・お問い合わせの記録は一定期間保管する」旨を記載すること
+    return { ok: true };
+  },
+);
 
 // ---------------------------------------------------------------------------
 // いいねされた／足跡の取得（プラン判定はサーバーで行い、
@@ -415,4 +834,69 @@ export const getInbox = onCall(OPTS, async (req) => {
     .map((p) => ({ id: p.id, ...summary(p) }));
 
   return { locked: false, total, items, nextCursor };
+});
+
+// ---------------------------------------------------------------------------
+// 年齢確認書類の提出
+// 💡 審査状況（ageVerified）はサーバーだけが書き換える。
+//    アプリから書けると、自分で「承認済み」にして年齢確認をすり抜けられてしまう。
+//    画像は先にアプリから Storage にアップロードし、ここで存在と形式を確認する。
+// ---------------------------------------------------------------------------
+const VERIFICATION_MAX_BYTES = 8 * 1024 * 1024;
+
+export const submitVerification = onCall(OPTS, async (req) => {
+  const uid = authUid(req);
+  const imagePath = `user_verifications/${uid}/verification_image`;
+  const file = getStorage().bucket(STORAGE_BUCKET).file(imagePath);
+
+  const [exists] = await file.exists();
+  if (!exists) {
+    throw new HttpsError("failed-precondition", "画像が見つかりません。もう一度アップロードしてください");
+  }
+
+  const [meta] = await file.getMetadata();
+  const size = Number(meta.size ?? 0);
+  const contentType = String(meta.contentType ?? "");
+  if (size <= 0 || size > VERIFICATION_MAX_BYTES || !contentType.startsWith("image/")) {
+    throw new HttpsError("invalid-argument", "画像の形式または大きさが正しくありません");
+  }
+
+  const me = await userRef(uid).get();
+  if (me.get("ageVerified") === "verified") return { status: "verified" };
+
+  // 💡 運営が書類を確認するためのリンク（Google Cloud コンソールの画面）。
+  //    プロジェクトの管理者としてログインしている人しか開けないので、
+  //    リンクが他人に見られても画像は見られない。
+  const projectId = process.env.GCLOUD_PROJECT ?? "frendy-app-project";
+  const reviewUrl =
+    `https://console.cloud.google.com/storage/browser/_details/${STORAGE_BUCKET}/${imagePath}` +
+    `?project=${projectId}`;
+
+  const now = FieldValue.serverTimestamp();
+  const batch = db.batch();
+  batch.set(db.collection("verification_requests").doc(uid), {
+    imagePath,
+    size,
+    contentType,
+    reviewUrl,
+    status: "pending",
+    submittedAt: now,
+  });
+  batch.set(
+    userRef(uid),
+    {
+      ageVerified: "pending",
+      // 💡 Firestore コンソールは項目を名前順に並べるので、
+      //    「ageVerified」で始まる名前にすると ageVerified のすぐ下に表示される。
+      //    運営以外が開いても画像は見られない（管理者ログインが必要なページ）。
+      ageVerifiedReviewUrl: reviewUrl,
+      verificationSubmittedAt: now,
+      verificationRejectionReason: "",
+      // 以前のバージョンで保存していた、誰でも見られる身分証のURLを消す
+      verificationImageUrl: FieldValue.delete(),
+    },
+    { merge: true },
+  );
+  await batch.commit();
+  return { status: "pending" };
 });

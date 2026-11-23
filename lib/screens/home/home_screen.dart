@@ -12,6 +12,12 @@ import 'package:matching_app/constants/app_colors.dart';
 const Duration _kNetworkTimeout = Duration(seconds: 15);
 const String _kFunctionsRegion = 'asia-northeast1';
 
+// 限定バッジの条件（index.ts の BADGE_RULES と必ずそろえること）
+const int _kSilverBadgePeers = 5;
+const int _kGoldBadgePeers = 10;
+const Color _kSilverColor = Color(0xFF9E9E9E);
+const Color _kGoldColor = Color(0xFFFFB300);
+
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -34,6 +40,10 @@ class _HomeScreenState extends State<HomeScreen> {
   //    build 内で作ると「もっと見る」やフォーム操作のたびに再購読して読み取りが増える
   late final Stream<QuerySnapshot<Map<String, dynamic>>> _noticesStream;
 
+  // 💡 限定バッジの進み具合を表示するため、自分のドキュメントを監視する（1件だけ）
+  //    人数（messagedPeersCount）とバッジ（badge）はサーバーが書き込む
+  Stream<DocumentSnapshot<Map<String, dynamic>>>? _myStream;
+
   // 招待コードは一度取得したら使い回す
   Future<String>? _inviteCodeFuture;
 
@@ -45,6 +55,14 @@ class _HomeScreenState extends State<HomeScreen> {
         .orderBy('createdAt', descending: true)
         .limit(10)
         .snapshots();
+
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid != null) {
+      _myStream = FirebaseFirestore.instance
+          .collection('users')
+          .doc(uid)
+          .snapshots();
+    }
   }
 
   @override
@@ -137,6 +155,8 @@ class _HomeScreenState extends State<HomeScreen> {
             _buildInviteBanner(),
             const SizedBox(height: 12),
             _buildStoreReviewBanner(),
+            const SizedBox(height: 12),
+            _buildBadgeBanner(),
             const SizedBox(height: 10),
           ],
         ),
@@ -452,7 +472,7 @@ class _HomeScreenState extends State<HomeScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  '友達招待で1ヶ月無料体験！',
+                  '友達招待で１ヶ月プレミアム無料体験！',
                   style: TextStyle(
                     color: Colors.white,
                     fontWeight: FontWeight.bold,
@@ -460,7 +480,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 ),
                 Text(
-                  'あなたの友達も１ヶ月無料体験が楽しめます！',
+                  'あなたの友達も１ヶ月プレムアム無料体験が楽しめます！',
                   style: TextStyle(color: Colors.white, fontSize: 12),
                 ),
               ],
@@ -610,6 +630,112 @@ class _HomeScreenState extends State<HomeScreen> {
       debugPrint('レビュー画面の表示エラー: $e');
       _toast('レビュー画面を開けませんでした。もう一度お試しください。', isError: true);
     }
+  }
+
+  // ==========================================================================
+  // 限定バッジ（メッセージを送った人数でもらえる）
+  // ==========================================================================
+  Widget _buildBadgeBanner() {
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: _myStream,
+      builder: (context, snapshot) {
+        final data = snapshot.data?.data() ?? const <String, dynamic>{};
+        final rawCount = data['messagedPeersCount'];
+        final int count = rawCount is num ? rawCount.toInt() : 0;
+        final String badge = data['badge'] is String
+            ? data['badge'] as String
+            : '';
+
+        final String subText;
+        if (badge == 'gold' || count >= _kGoldBadgePeers) {
+          subText = '金バッジ獲得済み！たくさんの出会いをありがとう🎉';
+        } else if (badge == 'silver' || count >= _kSilverBadgePeers) {
+          subText = '銀バッジ獲得済み！あと${_kGoldBadgePeers - count}人で金バッジ';
+        } else {
+          subText = 'あと${_kSilverBadgePeers - count}人で銀バッジ（今 $count人）';
+        }
+
+        return Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              colors: [
+                _kGoldColor.withValues(alpha: 0.15),
+                _kSilverColor.withValues(alpha: 0.08),
+              ],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
+            borderRadius: BorderRadius.circular(15),
+            border: Border.all(
+              color: _kGoldColor.withValues(alpha: 0.35),
+              width: 1.5,
+            ),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                Icons.military_tech_rounded,
+                color: badge == 'silver' ? _kSilverColor : _kGoldColor,
+                size: 40,
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      '5人にメッセージを送ると限定バッジプレゼント！',
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 15,
+                        color: Colors.black87,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      subText,
+                      style: const TextStyle(
+                        color: Colors.black54,
+                        fontSize: 12,
+                        height: 1.4,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              ElevatedButton(
+                onPressed: () => _showBadgeDetails(count, badge),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _kGoldColor,
+                  foregroundColor: Colors.white,
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                ),
+                child: const Text(
+                  '詳細',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  void _showBadgeDetails(int count, String badge) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (sheetContext) => _BadgeSheet(count: count, badge: badge),
+    );
   }
 }
 
@@ -802,6 +928,186 @@ class _InviteSheetState extends State<_InviteSheet> {
             ),
           ),
           SizedBox(height: MediaQuery.of(context).padding.bottom),
+        ],
+      ),
+    );
+  }
+}
+
+// ----------------------------------------------------------------------------
+// 限定バッジの詳細シート
+// ----------------------------------------------------------------------------
+class _BadgeSheet extends StatelessWidget {
+  const _BadgeSheet({required this.count, required this.badge});
+
+  final int count;
+  final String badge;
+
+  Widget _badgeRow({
+    required Color color,
+    required String name,
+    required int peers,
+    required bool earned,
+  }) {
+    final int remaining = (peers - count).clamp(0, peers);
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: color.withValues(alpha: earned ? 0.8 : 0.3),
+          width: 1.5,
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.military_tech_rounded, color: color, size: 40),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  name,
+                  style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  '$peers人にメッセージを送るともらえます',
+                  style: const TextStyle(fontSize: 12, color: Colors.black54),
+                ),
+              ],
+            ),
+          ),
+          Text(
+            earned ? '獲得済み' : 'あと$remaining人',
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.bold,
+              color: earned ? color : Colors.black45,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bool hasGold = badge == 'gold' || count >= _kGoldBadgePeers;
+    final bool hasSilver =
+        hasGold || badge == 'silver' || count >= _kSilverBadgePeers;
+    final double progress = (count / _kGoldBadgePeers).clamp(0.0, 1.0);
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.only(
+          topLeft: Radius.circular(30),
+          topRight: Radius.circular(30),
+        ),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 40,
+            height: 4,
+            margin: const EdgeInsets.only(bottom: 20),
+            decoration: BoxDecoration(
+              color: Colors.grey[300],
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const Icon(Icons.emoji_events_rounded, color: _kGoldColor, size: 48),
+          const SizedBox(height: 12),
+          const Text(
+            '限定バッジプレゼント',
+            style: TextStyle(
+              fontSize: 22,
+              fontWeight: FontWeight.bold,
+              color: Colors.black87,
+            ),
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'メッセージを送った相手の人数に応じて、限定バッジがもらえます。',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 13, color: Colors.black54, height: 1.5),
+          ),
+          const SizedBox(height: 20),
+
+          // 進み具合
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              'メッセージを送った人数：$count人',
+              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+            ),
+          ),
+          const SizedBox(height: 8),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(6),
+            child: LinearProgressIndicator(
+              value: progress,
+              minHeight: 10,
+              backgroundColor: Colors.grey[200],
+              color: hasSilver ? _kGoldColor : _kSilverColor,
+            ),
+          ),
+          const SizedBox(height: 20),
+
+          _badgeRow(
+            color: _kSilverColor,
+            name: '銀バッジ',
+            peers: _kSilverBadgePeers,
+            earned: hasSilver,
+          ),
+          _badgeRow(
+            color: _kGoldColor,
+            name: '金バッジ',
+            peers: _kGoldBadgePeers,
+            earned: hasGold,
+          ),
+
+          const SizedBox(height: 4),
+          Text(
+            '※ 同じ相手に何通送っても、1人として数えます。\n'
+            '※ メッセージの送信には年齢確認が必要です。\n'
+            '※ 数え始めは、この機能の開始後に送ったメッセージからです。',
+            style: TextStyle(
+              fontSize: 11,
+              color: Colors.grey[600],
+              height: 1.6,
+            ),
+          ),
+          const SizedBox(height: 24),
+          SizedBox(
+            width: double.infinity,
+            height: 54,
+            child: ElevatedButton(
+              onPressed: () => Navigator.pop(context),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.grey[100],
+                foregroundColor: Colors.black54,
+                elevation: 0,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(15),
+                ),
+              ),
+              child: const Text(
+                '閉じる',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+            ),
+          ),
+          SizedBox(height: MediaQuery.paddingOf(context).bottom),
         ],
       ),
     );

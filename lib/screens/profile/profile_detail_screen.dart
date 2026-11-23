@@ -1,17 +1,55 @@
 import 'dart:async';
-import 'dart:io';
+
+import 'package:cached_network_image/cached_network_image.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:cached_network_image/cached_network_image.dart'; // ★追加：高機能キャッシュ画像ライブラリ
 import 'package:matching_app/constants/app_colors.dart';
+import 'package:matching_app/screens/profile/profile_setup_screen.dart';
+import 'package:matching_app/screens/subscription/subscription_screen.dart';
 import 'package:matching_app/screens/talk/talk_screen.dart' hide AppColors;
-import 'package:matching_app/screens/subscription/subscription_screen.dart'; // 💡 追加：メンバーシップ画面へ遷移させるため
-import 'package:matching_app/screens/profile/profile_setup_screen.dart'; // 💡 追加：プロフィール未完成時の誘導先
+
+// ============================================================================
+// プロフィール詳細
+//
+// 💡 いいね・足跡・ブロック・トーク開始は、すべて Cloud Functions 経由で行う。
+//    相手のデータをアプリから直接書き換えないことで、なりすましや
+//    「上限の数字を自分で0に戻す」といった不正を防ぐ。
+// ============================================================================
+
+const Duration _kNetworkTimeout = Duration(seconds: 20);
+const String _kFunctionsRegion = 'asia-northeast1';
+
+FirebaseFirestore get _db => FirebaseFirestore.instance;
+
+HttpsCallable _callable(String name) => FirebaseFunctions.instanceFor(
+  region: _kFunctionsRegion,
+).httpsCallable(name, options: HttpsCallableOptions(timeout: _kNetworkTimeout));
+
+String _errorMessage(Object e, String fallback) {
+  if (e is FirebaseFunctionsException) {
+    switch (e.code) {
+      case 'failed-precondition':
+      case 'not-found':
+      case 'invalid-argument':
+      case 'permission-denied':
+      case 'resource-exhausted':
+        return e.message ?? fallback;
+      case 'unauthenticated':
+        return 'ログインの有効期限が切れました。再度ログインしてください。';
+      case 'deadline-exceeded':
+      case 'unavailable':
+        return '通信状況を確認して、もう一度お試しください。';
+    }
+  }
+  if (e is TimeoutException) return '通信がタイムアウトしました。もう一度お試しください。';
+  return fallback;
+}
 
 class ProfileDetailScreen extends StatefulWidget {
-  final Map<String, dynamic> userData; // Firestoreからのデータ
+  final Map<String, dynamic> userData; // 相手の公開プロフィール
   final String userId; // 相手のID
 
   const ProfileDetailScreen({
@@ -28,41 +66,70 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
   final PageController _pageController = PageController();
   int _currentPage = 0;
 
-  // 💡 プラン別制限用の変数群
-  String _myPlan = 'free'; // 'free', 'light', 'standard', etc.
-  int _monthlyNewTalkCount = 0; // 今月すでに使った新規トーク開始枠の数
-  bool _hasChatHistoryWithThisPeer = false;
-  bool _isLoadingLimits = true;
+  late final String _myId;
+  late final bool _isMyProfile;
 
-  // 💡 自分自身のプロフィールの名前。未設定のままだと、
-  //    誰にもトークを開始できないようにするためのガードに使う
-  //    （search_screen.dartのプロフィール完成判定と同じ基準に揃えている）
-  String _myName = '';
-  bool get _isMyNameMissing {
-    final String trimmed = _myName.trim();
-    return trimmed.isEmpty || trimmed == '名前未設定' || trimmed == 'ユーザー';
+  // --- サーバーから受け取る状態 ---
+  bool _loadingState = true;
+  bool _peerExists = true;
+  bool _iBlockedPeer = false;
+  bool _canInteract = true;
+  bool _hasChatHistory = false;
+  bool _nameMissing = false;
+  int? _monthlyLimit; // null = 無制限
+  int _monthlyUsed = 0;
+
+  // --- 操作中フラグ（連打防止） ---
+  bool _startingTalk = false;
+  bool _togglingLike = false;
+  bool _blockBusy = false;
+
+  // --- いいね状態 ---
+  Stream<DocumentSnapshot<Map<String, dynamic>>>? _likeStream;
+  bool? _optimisticLiked; // ボタンを押した直後の表示用
+
+  bool get _isBlockedRelationship => !_canInteract;
+
+  bool get _isMonthlyLimitReached =>
+      _monthlyLimit != null &&
+      !_hasChatHistory &&
+      _monthlyUsed >= _monthlyLimit!;
+
+  String get _peerName {
+    final n = widget.userData['name'];
+    return n is String && n.trim().isNotEmpty ? n : 'このユーザー';
   }
 
-  // 💡 ブロック関係の状態（自分が相手をブロック、または相手から自分がブロックされている場合はtrue）
-  bool _iBlockedPeer = false;
-  bool _blockedByPeer = false;
-  bool get _isBlockedRelationship => _iBlockedPeer || _blockedByPeer;
-
-  // 💡 いいね機能用の状態
-  //    「いいね済みかどうか」は、ローカルの一時変数ではなく
-  //    Firestoreのストリームを直接購読する方式にすることで、
-  //    画面を行き来しても常に最新・正しい値が表示されるようにする。
-  //    💡 カウント機能は廃止したため、likeCountに関する状態・処理は一切持たない
-  bool _isTogglingLike = false; // 連打防止用ガード
-  bool _isBlockActionInProgress = false; // ブロック処理の連打防止
-
-  static const Duration _networkTimeout = Duration(seconds: 20);
+  // 💡 https の画像だけを使う（不正な値でクラッシュしないように）
+  List<String> get _imageUrls {
+    final raw = widget.userData['imageUrls'];
+    if (raw is! List) return const [];
+    return raw
+        .whereType<String>()
+        .where((u) => u.startsWith('https://'))
+        .toList();
+  }
 
   @override
   void initState() {
     super.initState();
-    _addFootprint();
-    _loadUserPlanAndLimits();
+    _myId = FirebaseAuth.instance.currentUser?.uid ?? '';
+    _isMyProfile = _myId.isEmpty || widget.userId == _myId;
+
+    if (_isMyProfile) {
+      _loadingState = false;
+      return;
+    }
+
+    _likeStream = _db
+        .collection('users')
+        .doc(_myId)
+        .collection('likes')
+        .doc(widget.userId)
+        .snapshots();
+
+    _recordFootprint();
+    _loadState();
   }
 
   @override
@@ -71,196 +138,176 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
     super.dispose();
   }
 
-  // --- ヘルパー：有効な値があるかチェックするロジック ---
-  bool _hasValue(dynamic value) {
-    if (value == null ||
-        value.toString().trim().isEmpty ||
-        value.toString() == '未設定' ||
-        value.toString() == '未入力') {
-      return false;
-    }
-    return true;
+  void _toast(String message, {bool isError = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: isError ? Colors.redAccent : null,
+        ),
+      );
   }
 
-  // 💡 UIDが8文字未満の場合でもクラッシュしないよう安全に短縮する
-  String _shortId(String id) => id.length >= 8 ? id.substring(0, 8) : id;
+  // ==========================================================================
+  // サーバーとのやり取り
+  // ==========================================================================
 
-  // 💡 現在の年月を "2026-07" のような文字列で返す（月次リセット判定に使用）
-  String _currentPeriodString() {
-    final DateTime now = DateTime.now();
-    return '${now.year}-${now.month.toString().padLeft(2, '0')}';
-  }
-
-  // ==========================================
-  // 💡 プランと月次トーク開始枠、ブロック関係を読み込むバックエンド処理
-  // ==========================================
-  Future<void> _loadUserPlanAndLimits() async {
-    final String? myId = FirebaseAuth.instance.currentUser?.uid;
-    if (myId == null) return;
-
-    try {
-      // 1. 自分の現在のプラン情報 & 月次カウンター & ブロック関係を取得
-      final myDoc = await FirebaseFirestore.instance
-          .collection('users')
-          .doc(myId)
-          .get()
-          .timeout(_networkTimeout);
-      if (myDoc.exists) {
-        final myData = myDoc.data() ?? {};
-        _myPlan = myData['plan'] ?? 'free';
-        _myName = (myData['name'] ?? '').toString();
-
-        // 💡 保存されている集計対象月と「今月」が違えば、表示上は0人扱いにする
-        //    （実際のFirestore側のリセットは、次回消費時にトランザクションで行う）
-        final String storedPeriod = myData['monthlyResetPeriod'] ?? '';
-        final int storedCount = myData['monthlyNewTalkCount'] ?? 0;
-        _monthlyNewTalkCount = (storedPeriod == _currentPeriodString())
-            ? storedCount
-            : 0;
-
-        // 💡 ブロック関係の確認：自分が相手をブロックしているか
-        final List<dynamic> myBlocks = myData['blocks'] ?? [];
-        _iBlockedPeer = myBlocks.contains(widget.userId);
-      }
-
-      // 2. このお相手との個別トーク履歴がすでに存在するかチェック
-      final String chatRoomId = ([myId, widget.userId]..sort()).join("_");
-      final roomDoc = await FirebaseFirestore.instance
-          .collection('chat_rooms')
-          .doc(chatRoomId)
-          .get()
-          .timeout(_networkTimeout);
-      if (roomDoc.exists) {
-        final roomData = roomDoc.data();
-        final String lastMessage = roomData?['lastMessage'] ?? '';
-        _hasChatHistoryWithThisPeer = lastMessage.isNotEmpty;
-      }
-
-      // 3. 相手から自分がブロックされているかを確認
-      final peerDoc = await FirebaseFirestore.instance
-          .collection('users')
-          .doc(widget.userId)
-          .get()
-          .timeout(_networkTimeout);
-      if (peerDoc.exists) {
-        final peerData = peerDoc.data() ?? {};
-        final List<dynamic> peerBlocks = peerData['blocks'] ?? [];
-        _blockedByPeer = peerBlocks.contains(myId);
-      }
-
-      if (mounted) {
-        setState(() {
-          _isLoadingLimits = false;
-        });
-      }
-    } catch (e) {
-      debugPrint("プラン制限情報読み込みエラー: $e");
-      if (mounted) {
-        setState(() {
-          _isLoadingLimits = false;
-        });
-      }
-    }
-  }
-
-  // 💡 現在のプランにおける「月あたりの新規トーク開始可能数」を返す
-  //    フリー: 5人/月、ライト: 15人/月、それ以外: 無制限
-  int _monthlyAllowedLimit() {
-    if (_myPlan == 'free') return 5;
-    if (_myPlan == 'light') return 15;
-    return 9999;
-  }
-
-  // 💡 月次の新規トーク開始枠を1つ消費する（トランザクションで安全に処理）
-  //    月が変わっていれば自動的にカウントを1から数え直す
-  Future<bool> _tryConsumeMonthlySlot(String myId, int allowedLimit) async {
-    final docRef = FirebaseFirestore.instance.collection('users').doc(myId);
-    final String currentPeriod = _currentPeriodString();
-
-    return FirebaseFirestore.instance.runTransaction<bool>((transaction) async {
-      final snapshot = await transaction.get(docRef);
-      final data = snapshot.data() ?? {};
-      final String storedPeriod = data['monthlyResetPeriod'] ?? '';
-      final int storedCount = data['monthlyNewTalkCount'] ?? 0;
-
-      // 保存されている月が今月と違えば、0人からカウントし直す（＝月次リセット）
-      final int currentCount = (storedPeriod == currentPeriod)
-          ? storedCount
-          : 0;
-
-      if (currentCount >= allowedLimit) {
-        return false; // 上限到達につき消費できない
-      }
-
-      transaction.set(docRef, {
-        'monthlyNewTalkCount': currentCount + 1,
-        'monthlyResetPeriod': currentPeriod,
-      }, SetOptions(merge: true));
-
-      return true;
+  // 💡 足跡はサーバー側で「同じ相手には10分に1回まで」に制限している
+  void _recordFootprint() {
+    _callable('recordFootprint').call({'peerId': widget.userId}).catchError((
+      e,
+    ) {
+      debugPrint('足跡の記録に失敗しました: $e');
+      return null;
     });
   }
 
-  // ==========================================
-  // 💡 新規トーク開始の可否チェック＆遷移（月次カウンター消費方式）
-  // ==========================================
-  Future<void> _handleTalkTransition() async {
-    final String? myId = FirebaseAuth.instance.currentUser?.uid;
-    if (myId == null) return;
-
-    // 💡 ブロック関係にある場合はトークを開始させない
-    if (_isBlockedRelationship) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('このユーザーとはやり取りできません。')));
-      return;
-    }
-
-    // 1. 既にメッセージ履歴が存在するトークルーム、または自分自身のプロフィールなら無制限
-    if (_hasChatHistoryWithThisPeer || widget.userId == myId) {
-      _navigateToTalkScreen();
-      return;
-    }
-
-    final int allowedLimit = _monthlyAllowedLimit();
-
-    // 無制限プラン（スタンダード以上）はカウンター消費なしでそのまま遷移
-    if (allowedLimit >= 9999) {
-      _navigateToTalkScreen();
-      return;
-    }
-
-    // 2. 月次の新規トーク開始枠を1つ消費できるか試みる（トランザクションで安全に判定）
-    final bool consumed = await _tryConsumeMonthlySlot(myId, allowedLimit);
-    if (!mounted) return;
-
-    if (consumed) {
+  Future<void> _loadState() async {
+    try {
+      final res = await _callable(
+        'getProfileState',
+      ).call({'peerId': widget.userId});
+      final d = Map<String, dynamic>.from(res.data as Map);
+      if (!mounted) return;
       setState(() {
-        _monthlyNewTalkCount += 1; // 画面上の表示もその場で更新
+        _peerExists = d['peerExists'] == true;
+        _iBlockedPeer = d['iBlocked'] == true;
+        _canInteract = d['canInteract'] == true;
+        _hasChatHistory = d['hasChatHistory'] == true;
+        _nameMissing = d['nameMissing'] == true;
+        final limit = d['monthlyLimit'];
+        _monthlyLimit = limit is num ? limit.toInt() : null;
+        final used = d['monthlyUsed'];
+        _monthlyUsed = used is num ? used.toInt() : 0;
+        _loadingState = false;
       });
-      _navigateToTalkScreen();
-    } else {
-      _showLimitReachedDialog(allowedLimit);
+    } catch (e) {
+      debugPrint('プロフィール状態の取得エラー: $e');
+      if (!mounted) return;
+      // 取得できなかった場合は、ボタンを押したときにサーバーで判定させる
+      setState(() => _loadingState = false);
     }
   }
 
-  // 枠上限に達した時の誘導アラート
-  void _showLimitReachedDialog(int limit) {
-    String title = "今月のトーク開始上限に達しました";
-    String content =
-        "現在のプランでは、新しく話しかけられるのは月に$limit人までです。今月はすでに上限に達しています。\n\n『ライトプラン』や『スタンダードプラン』に登録すると、月あたりの上限が増えたり、上限なしで会話できるようになります。";
+  // --- トーク開始 ---
+  Future<void> _startTalk() async {
+    if (_startingTalk) return;
+    setState(() => _startingTalk = true);
 
+    try {
+      final res = await _callable('startTalk').call({'peerId': widget.userId});
+      final d = Map<String, dynamic>.from(res.data as Map);
+      if (!mounted) return;
+      setState(() {
+        if (d['consumed'] == true) _monthlyUsed += 1;
+        _hasChatHistory = true;
+      });
+      _navigateToTalkScreen();
+    } on FirebaseFunctionsException catch (e) {
+      debugPrint('トーク開始エラー: ${e.code} ${e.message}');
+      if (!mounted) return;
+      if (e.code == 'resource-exhausted') {
+        final details = e.details;
+        final limit = details is Map && details['limit'] is num
+            ? (details['limit'] as num).toInt()
+            : (_monthlyLimit ?? 0);
+        setState(() => _monthlyUsed = limit);
+        _showLimitReachedDialog(limit);
+      } else {
+        _toast(_errorMessage(e, 'トークを開始できませんでした。'), isError: true);
+        if (e.code == 'failed-precondition') _loadState(); // 状態が変わった可能性
+      }
+    } catch (e) {
+      debugPrint('トーク開始エラー: $e');
+      _toast(_errorMessage(e, 'トークを開始できませんでした。'), isError: true);
+    } finally {
+      if (mounted) setState(() => _startingTalk = false);
+    }
+  }
+
+  void _navigateToTalkScreen() {
+    final images = _imageUrls;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => TalkScreen(
+          userName: _peerName,
+          peerId: widget.userId,
+          peerImageUrl: images.isNotEmpty ? images.first : '',
+        ),
+      ),
+    );
+  }
+
+  // --- いいね ---
+  Future<void> _toggleLike(bool currentlyLiked) async {
+    if (_togglingLike || _isBlockedRelationship) return;
+    final bool next = !currentlyLiked;
+
+    setState(() {
+      _togglingLike = true;
+      _optimisticLiked = next; // 押した瞬間に見た目を切り替える
+    });
+
+    try {
+      await _callable(
+        next ? 'likeUser' : 'unlikeUser',
+      ).call({'peerId': widget.userId});
+    } catch (e) {
+      debugPrint('いいね処理エラー: $e');
+      if (mounted) setState(() => _optimisticLiked = null); // 元に戻す
+      _toast(_errorMessage(e, 'いいねの処理に失敗しました。'), isError: true);
+    } finally {
+      if (mounted) setState(() => _togglingLike = false);
+    }
+  }
+
+  // --- ブロック／解除 ---
+  Future<void> _toggleBlock({required bool unblock}) async {
+    if (_blockBusy) return;
+    setState(() => _blockBusy = true);
+
+    try {
+      await _callable(
+        unblock ? 'unblockUser' : 'blockUser',
+      ).call({'peerId': widget.userId});
+      if (!mounted) return;
+      setState(() {
+        _iBlockedPeer = !unblock;
+        if (!unblock) {
+          _canInteract = false;
+          _optimisticLiked = false; // ブロックでいいねも消える
+        }
+      });
+      _toast(unblock ? 'ブロックを解除しました' : 'ブロックしました');
+      if (unblock) _loadState(); // 相手側のブロック状況も含めて取り直す
+    } catch (e) {
+      debugPrint('ブロック処理エラー: $e');
+      _toast(_errorMessage(e, '操作に失敗しました。もう一度お試しください。'), isError: true);
+    } finally {
+      if (mounted) setState(() => _blockBusy = false);
+    }
+  }
+
+  // ==========================================================================
+  // ダイアログ・シート
+  // ==========================================================================
+  void _showLimitReachedDialog(int limit) {
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
+      builder: (dialogContext) => AlertDialog(
         backgroundColor: Colors.white,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: Text(
-          title,
-          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+        title: const Text(
+          '今月のトーク開始上限に達しました',
+          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
         ),
         content: Text(
-          content,
+          '現在のプランでは、新しく話しかけられるのは月に$limit人までです。今月はすでに上限に達しています。\n\n'
+          '『ライトプラン』や『スタンダードプラン』に登録すると、月あたりの上限が増えたり、上限なしで会話できるようになります。',
           style: const TextStyle(
             fontSize: 14,
             height: 1.5,
@@ -269,7 +316,7 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context),
+            onPressed: () => Navigator.pop(dialogContext),
             child: const Text(
               '閉じる',
               style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold),
@@ -283,12 +330,14 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
               ),
               elevation: 0,
             ),
-            onPressed: () {
-              Navigator.pop(context); // アラートを閉じる
-              Navigator.push(
+            onPressed: () async {
+              Navigator.pop(dialogContext);
+              await Navigator.push(
                 context,
                 MaterialPageRoute(builder: (_) => const SubscriptionScreen()),
               );
+              // 💡 プラン変更後に戻ってきたら、上限を取り直す
+              if (mounted) _loadState();
             },
             child: const Text(
               'プラン一覧を見る',
@@ -303,11 +352,10 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
     );
   }
 
-  // 💡 自分の名前が未設定のままトークしようとした時に表示する誘導ダイアログ
   void _showProfileIncompleteDialog() {
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
+      builder: (dialogContext) => AlertDialog(
         backgroundColor: Colors.white,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
         title: const Text(
@@ -320,7 +368,7 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context),
+            onPressed: () => Navigator.pop(dialogContext),
             child: const Text(
               '閉じる',
               style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold),
@@ -334,12 +382,13 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
               ),
               elevation: 0,
             ),
-            onPressed: () {
-              Navigator.pop(context); // アラートを閉じる
-              Navigator.push(
+            onPressed: () async {
+              Navigator.pop(dialogContext);
+              await Navigator.push(
                 context,
                 MaterialPageRoute(builder: (_) => const ProfileSetupScreen()),
               );
+              if (mounted) _loadState();
             },
             child: const Text(
               'プロフィールを編集する',
@@ -354,396 +403,52 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
     );
   }
 
-  void _navigateToTalkScreen() {
-    final data = widget.userData;
-    final String imageUrl = (data['imageUrls'] as List? ?? []).isNotEmpty
-        ? data['imageUrls'][0]
-        : 'https://via.placeholder.com/150';
-
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (context) => TalkScreen(
-          userName: data['name'] ?? '不明',
-          peerId: widget.userId,
-          peerImageUrl: imageUrl,
-        ),
-      ),
-    );
-  }
-
-  // ==========================================
-  // 💡 いいね機能（カウント機能は廃止し、押したかどうかのトグルのみ）
-  //    - 'likes'（自分のドキュメント）  ：自分が誰をいいねしたか
-  //    - 'likedBy'（相手のドキュメント）：誰から自分がいいねされたか
-  //    をそれぞれ配列で管理する。人数の集計（likeCount）は一切行わない
-  // ==========================================
-
-  Future<void> _toggleLike(bool currentlyLiked) async {
-    final String myId = FirebaseAuth.instance.currentUser?.uid ?? '';
-    final String peerId = widget.userId;
-    final bool isMyProfile = peerId == myId;
-
-    // 💡 未ログイン・自分自身のプロフィール・連打中・ブロック関係の場合は何もしない
-    if (myId.isEmpty ||
-        isMyProfile ||
-        _isTogglingLike ||
-        _isBlockedRelationship) {
-      return;
-    }
-
-    final bool nextLiked = !currentlyLiked;
-    setState(() => _isTogglingLike = true);
-
-    final myDocRef = FirebaseFirestore.instance.collection('users').doc(myId);
-    final peerDocRef = FirebaseFirestore.instance
-        .collection('users')
-        .doc(peerId);
-
-    try {
-      final batch = FirebaseFirestore.instance.batch();
-
-      if (nextLiked) {
-        batch.set(myDocRef, {
-          'likes': FieldValue.arrayUnion([peerId]),
-        }, SetOptions(merge: true));
-        batch.set(peerDocRef, {
-          'likedBy': FieldValue.arrayUnion([myId]),
-        }, SetOptions(merge: true));
-      } else {
-        batch.set(myDocRef, {
-          'likes': FieldValue.arrayRemove([peerId]),
-        }, SetOptions(merge: true));
-        batch.set(peerDocRef, {
-          'likedBy': FieldValue.arrayRemove([myId]),
-        }, SetOptions(merge: true));
-      }
-
-      await batch.commit().timeout(_networkTimeout);
-      // 💡 ローカル状態は持たないため、書き込み成功後はストリームが
-      //    自動的に最新の状態を反映してくれる（明示的な巻き戻し処理は不要）
-    } on FirebaseException catch (e) {
-      debugPrint('いいね処理エラー(Firestore): code=${e.code} message=${e.message}');
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('いいねの処理に失敗しました（${e.code}）')));
-      }
-    } catch (e) {
-      debugPrint('いいね処理エラー(その他): $e');
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('いいねの処理に失敗しました（$e）')));
-      }
-    } finally {
-      if (mounted) setState(() => _isTogglingLike = false);
-    }
-  }
-
-  // 💡 いいねボタン（数字のカウント表示なし）。
-  //    自分側の 'likes' 配列をリアルタイム購読することで、
-  //    このウィジェットが再生成されても（＝別画面から戻ってきても）
-  //    常にFirestore上の最新・正しい「押したかどうか」を表示する
-  Widget _buildLikeSection() {
-    final String myId = FirebaseAuth.instance.currentUser?.uid ?? '';
-
-    // 💡 未ログイン、またはブロック関係にある場合はいいねボタン自体を表示しない
-    if (myId.isEmpty || _isBlockedRelationship) return const SizedBox.shrink();
-
-    return StreamBuilder<DocumentSnapshot>(
-      stream: FirebaseFirestore.instance
-          .collection('users')
-          .doc(myId)
-          .snapshots(),
-      builder: (context, mySnap) {
-        final myData = mySnap.data?.data() as Map<String, dynamic>?;
-        final List<dynamic> myLikes = myData?['likes'] ?? [];
-        final bool isLiked = myLikes.contains(widget.userId);
-
-        return Padding(
-          padding: const EdgeInsets.only(left: 10),
-          child: GestureDetector(
-            onTap: _isTogglingLike ? null : () => _toggleLike(isLiked),
-            child: Icon(
-              // 💡 「グッドボタン」（サムズアップ）アイコン。カウント数字は表示しない
-              isLiked ? Icons.thumb_up_alt : Icons.thumb_up_alt_outlined,
-              color: const Color(0xFFFF8A80),
-              size: 24,
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  // ==========================================
-  // 💡 通報機能（UGCコンテンツのモデレーション対応）
-  //    Appleガイドライン1.2は、ユーザー生成コンテンツを含むアプリに
-  //    「不適切なコンテンツ・ユーザーを通報する仕組み」を要求している。
-  //    以前はFriendsScreen経由でしか通報できなかったが、
-  //    まだ友達でない相手のプロフィールを見た時にも通報できるようにする
-  // ==========================================
-  void _showReportDialog() {
-    final TextEditingController reasonController = TextEditingController();
-    final String currentUserId = FirebaseAuth.instance.currentUser?.uid ?? '';
-    final String peerName = widget.userData['name'] ?? 'このユーザー';
-
-    showDialog(
+  Future<void> _showReportDialog() async {
+    final sent = await showDialog<bool>(
       context: context,
-      builder: (dialogContext) => StatefulBuilder(
-        builder: (dialogContext, setDialogState) {
-          bool isSubmitting = false;
-
-          Future<void> handleSubmit() async {
-            final String reason = reasonController.text.trim();
-            if (reason.isEmpty || isSubmitting) return;
-
-            setDialogState(() => isSubmitting = true);
-
-            try {
-              await FirebaseFirestore.instance
-                  .collection('reports')
-                  .add({
-                    'type': 'user',
-                    'reporterId': currentUserId,
-                    'reportedId': widget.userId,
-                    'reason': reason,
-                    'createdAt': FieldValue.serverTimestamp(),
-                  })
-                  .timeout(_networkTimeout);
-
-              if (dialogContext.mounted) Navigator.pop(dialogContext);
-              if (mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('報告ありがとうございます。運営で確認いたします。')),
-                );
-              }
-            } catch (e) {
-              debugPrint('通報送信エラー: $e');
-              setDialogState(() => isSubmitting = false);
-              if (dialogContext.mounted) {
-                ScaffoldMessenger.of(dialogContext).showSnackBar(
-                  const SnackBar(
-                    content: Text('通報の送信に失敗しました。もう一度お試しください。'),
-                    backgroundColor: Colors.redAccent,
-                  ),
-                );
-              }
-            }
-          }
-
-          return AlertDialog(
-            backgroundColor: Colors.white,
-            surfaceTintColor: Colors.white,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(24),
-            ),
-            title: Text(
-              '$peerName さんを通報',
-              textAlign: TextAlign.center,
-              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
-            ),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Text(
-                  '不適切な言動や規約違反がありましたか？\n理由を詳しく教えてください。',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Colors.grey,
-                    height: 1.5,
-                  ),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 20),
-                TextField(
-                  controller: reasonController,
-                  maxLines: 4,
-                  maxLength: 500,
-                  enabled: !isSubmitting,
-                  style: const TextStyle(fontSize: 14),
-                  decoration: InputDecoration(
-                    hintText: '通報理由を入力...',
-                    filled: true,
-                    fillColor: Colors.grey[50],
-                    contentPadding: const EdgeInsets.all(16),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(16),
-                      borderSide: BorderSide(color: Colors.grey[200]!),
-                    ),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(16),
-                      borderSide: const BorderSide(
-                        color: Colors.redAccent,
-                        width: 1.5,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            actionsPadding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
-            actions: [
-              Row(
-                children: [
-                  Expanded(
-                    child: TextButton(
-                      onPressed: isSubmitting
-                          ? null
-                          : () => Navigator.pop(dialogContext),
-                      child: const Text(
-                        'キャンセル',
-                        style: TextStyle(
-                          color: Colors.grey,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: ElevatedButton(
-                      onPressed: isSubmitting ? null : handleSubmit,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.redAccent,
-                        foregroundColor: Colors.white,
-                        disabledBackgroundColor: Colors.grey[300],
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                      ),
-                      child: isSubmitting
-                          ? const SizedBox(
-                              width: 16,
-                              height: 16,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: Colors.white,
-                              ),
-                            )
-                          : const Text(
-                              '通報する',
-                              style: TextStyle(fontWeight: FontWeight.bold),
-                            ),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          );
-        },
+      builder: (_) => _ReportDialog(
+        reporterId: _myId,
+        peerId: widget.userId,
+        peerName: _peerName,
       ),
     );
+    if (sent == true) _toast('報告ありがとうございます。運営で確認いたします。');
   }
 
-  // ==========================================
-  // 💡 ブロック機能（トグル：未ブロックなら確認の上ブロック、既にブロック中なら解除）
-  // ==========================================
   void _showBlockConfirmation() {
-    final String peerName = widget.userData['name'] ?? 'このユーザー';
-
-    if (_iBlockedPeer) {
-      // 既にブロック中の場合は、解除確認を出す
-      showDialog(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: Text('$peerName さんのブロックを解除しますか？'),
-          content: const Text('ブロックを解除すると、再びお互いのリストに表示されるようになります。'),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('キャンセル', style: TextStyle(color: Colors.grey)),
-            ),
-            TextButton(
-              onPressed: () {
-                Navigator.pop(context);
-                _toggleBlock(unblock: true);
-              },
-              child: const Text('解除する'),
-            ),
-          ],
-        ),
-      );
-      return;
-    }
-
+    final bool unblock = _iBlockedPeer;
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text('$peerName さんをブロック'),
-        content: const Text(
-          'ブロックすると、お互いのリストに表示されなくなり、メッセージのやり取りもできなくなります。よろしいですか？',
+      builder: (dialogContext) => AlertDialog(
+        title: Text(
+          unblock ? '$_peerName さんのブロックを解除しますか？' : '$_peerName さんをブロック',
+        ),
+        content: Text(
+          unblock
+              ? 'ブロックを解除すると、再びお互いのリストに表示されるようになります。'
+              : 'ブロックすると、お互いのリストに表示されなくなり、メッセージのやり取りもできなくなります。よろしいですか？',
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context),
+            onPressed: () => Navigator.pop(dialogContext),
             child: const Text('キャンセル', style: TextStyle(color: Colors.grey)),
           ),
           TextButton(
             onPressed: () {
-              Navigator.pop(context);
-              _toggleBlock(unblock: false);
+              Navigator.pop(dialogContext);
+              _toggleBlock(unblock: unblock);
             },
-            child: const Text(
-              'ブロックする',
-              style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold),
+            child: Text(
+              unblock ? '解除する' : 'ブロックする',
+              style: TextStyle(
+                color: unblock ? null : Colors.red,
+                fontWeight: FontWeight.bold,
+              ),
             ),
           ),
         ],
       ),
     );
-  }
-
-  Future<void> _toggleBlock({required bool unblock}) async {
-    final String myId = FirebaseAuth.instance.currentUser?.uid ?? '';
-    if (myId.isEmpty || _isBlockActionInProgress) return;
-
-    setState(() => _isBlockActionInProgress = true);
-
-    try {
-      final batch = FirebaseFirestore.instance.batch();
-      final myDocRef = FirebaseFirestore.instance.collection('users').doc(myId);
-      final peerDocRef = FirebaseFirestore.instance
-          .collection('users')
-          .doc(widget.userId);
-
-      if (unblock) {
-        batch.update(myDocRef, {
-          'blocks': FieldValue.arrayRemove([widget.userId]),
-        });
-        batch.update(peerDocRef, {
-          'blockedBy': FieldValue.arrayRemove([myId]),
-        });
-      } else {
-        batch.update(myDocRef, {
-          'blocks': FieldValue.arrayUnion([widget.userId]),
-          'friends': FieldValue.arrayRemove([widget.userId]),
-        });
-        batch.update(peerDocRef, {
-          'blockedBy': FieldValue.arrayUnion([myId]),
-          'friends': FieldValue.arrayRemove([myId]),
-        });
-      }
-
-      await batch.commit().timeout(_networkTimeout);
-
-      if (mounted) {
-        setState(() => _iBlockedPeer = !unblock);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(unblock ? 'ブロックを解除しました' : 'ブロックしました')),
-        );
-      }
-    } catch (e) {
-      debugPrint('ブロック処理エラー: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('操作に失敗しました。もう一度お試しください。')));
-      }
-    } finally {
-      if (mounted) setState(() => _isBlockActionInProgress = false);
-    }
   }
 
   void _showMoreActionsSheet() {
@@ -753,7 +458,7 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
       ),
-      builder: (_) => SafeArea(
+      builder: (sheetContext) => SafeArea(
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
           child: Column(
@@ -775,7 +480,7 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
                 ),
                 title: const Text('通報する'),
                 onTap: () {
-                  Navigator.pop(context);
+                  Navigator.pop(sheetContext);
                   _showReportDialog();
                 },
               ),
@@ -786,7 +491,7 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
                 ),
                 title: Text(_iBlockedPeer ? 'ブロックを解除する' : 'ブロックする'),
                 onTap: () {
-                  Navigator.pop(context);
+                  Navigator.pop(sheetContext);
                   _showBlockConfirmation();
                 },
               ),
@@ -797,53 +502,40 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
     );
   }
 
+  // ==========================================================================
+  // 画面
+  // ==========================================================================
   @override
   Widget build(BuildContext context) {
-    final String? currentUserId = FirebaseAuth.instance.currentUser?.uid;
-    final bool isMyProfile = widget.userId == currentUserId;
-
     final double screenWidth = MediaQuery.of(context).size.width;
     final int cacheSize =
         (screenWidth * MediaQuery.of(context).devicePixelRatio).round();
 
     final data = widget.userData;
-    final List<dynamic> imageUrls = data['imageUrls'] ?? [];
-    final Map<String, dynamic> valuesData = Map<String, dynamic>.from(
-      data['values'] ?? {},
-    );
+    final imageUrls = _imageUrls;
+    final Map<String, dynamic> valuesData = data['values'] is Map
+        ? Map<String, dynamic>.from(data['values'] as Map)
+        : {};
 
-    // --- セクションごとの表示判定用リスト作成 ---
-    // 💡 学校・職業欄を復活（任意項目として編集画面に再追加されたため）
-    final List<Widget> basicInfoTiles = [];
-    if (_hasValue(data['gender'])) {
-      basicInfoTiles.add(_buildDetailTile(Icons.wc, '性別', data['gender']));
-    }
-    if (_hasValue(data['location'])) {
-      basicInfoTiles.add(
+    final List<Widget> basicInfoTiles = [
+      if (_hasValue(data['gender']))
+        _buildDetailTile(Icons.wc, '性別', data['gender']),
+      if (_hasValue(data['location']))
         _buildDetailTile(Icons.location_on, '居住地', data['location']),
-      );
-    }
-    if (_hasValue(data['school'])) {
-      basicInfoTiles.add(_buildDetailTile(Icons.school, '学校', data['school']));
-    }
-    if (_hasValue(data['work'])) {
-      basicInfoTiles.add(_buildDetailTile(Icons.work, '職業', data['work']));
-    }
+      if (_hasValue(data['school']))
+        _buildDetailTile(Icons.school, '学校', data['school']),
+      if (_hasValue(data['work']))
+        _buildDetailTile(Icons.work, '職業', data['work']),
+    ];
 
-    // 💡 今月の新規トーク開始枠の上限に達しているかどうかを判定
-    //    （フリー・ライトのように上限が設定されているプランが対象。無制限プランは常にfalse）
-    final int _allowedLimit = _monthlyAllowedLimit();
-    final bool isMonthlyLimitReached =
-        _allowedLimit < 9999 &&
-        !_hasChatHistoryWithThisPeer &&
-        _monthlyNewTalkCount >= _allowedLimit;
+    final tags = data['tags'] is List ? (data['tags'] as List) : const [];
 
     return Scaffold(
       backgroundColor: Colors.white,
       appBar: AppBar(
         backgroundColor: Colors.white,
         title: Text(
-          data['name'] ?? '',
+          data['name'] is String ? data['name'] as String : '',
           style: const TextStyle(
             fontWeight: FontWeight.bold,
             color: Colors.black87,
@@ -853,11 +545,10 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
         elevation: 0,
         iconTheme: const IconThemeData(color: Colors.black87),
         actions: [
-          // 💡 自分自身のプロフィールでは通報・ブロックメニューを表示しない
-          if (!isMyProfile)
+          if (!_isMyProfile)
             IconButton(
               icon: const Icon(Icons.more_vert),
-              onPressed: _showMoreActionsSheet,
+              onPressed: _blockBusy ? null : _showMoreActionsSheet,
               tooltip: 'その他の操作',
             ),
         ],
@@ -866,7 +557,7 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // 1. 画像エリア（キャッシュ画像最適化）
+            // 1. 画像
             Stack(
               alignment: Alignment.center,
               children: [
@@ -888,7 +579,6 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
                           ),
                         );
                       }
-
                       return CachedNetworkImage(
                         imageUrl: imageUrls[index],
                         fit: BoxFit.cover,
@@ -896,7 +586,7 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
                         memCacheHeight: cacheSize,
                         placeholder: (context, url) => Container(
                           color: Colors.grey[100],
-                          child: Center(
+                          child: const Center(
                             child: SizedBox(
                               width: 30,
                               height: 30,
@@ -956,7 +646,7 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
               ],
             ),
 
-            // 2. プロフィール詳細エリア
+            // 2. 詳細
             Container(
               transform: Matrix4.translationValues(0, -20, 0),
               decoration: const BoxDecoration(
@@ -966,33 +656,15 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // 💡 ブロック関係にある場合は、その旨を明示する
-                  if (_isBlockedRelationship)
-                    Container(
-                      width: double.infinity,
-                      margin: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: Colors.grey[100],
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: Row(
-                        children: [
-                          Icon(Icons.block, size: 18, color: Colors.grey[600]),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              _iBlockedPeer
-                                  ? 'このユーザーをブロックしています'
-                                  : 'このユーザーとはやり取りできません',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: Colors.grey[700],
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
+                  if (!_isMyProfile &&
+                      !_loadingState &&
+                      (!_peerExists || _isBlockedRelationship))
+                    _buildNotice(
+                      !_peerExists
+                          ? 'このユーザーは退会しました'
+                          : (_iBlockedPeer
+                                ? 'このユーザーをブロックしています'
+                                : 'このユーザーとはやり取りできません'),
                     ),
                   Padding(
                     padding: const EdgeInsets.fromLTRB(16, 20, 16, 8),
@@ -1004,13 +676,8 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
                             Clipboard.setData(
                               ClipboardData(text: widget.userId),
                             );
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                content: Text(
-                                  'ID: ${_shortId(widget.userId)}... をコピーしました',
-                                ),
-                                behavior: SnackBarBehavior.floating,
-                              ),
+                            _toast(
+                              'ID: ${_shortId(widget.userId)}... をコピーしました',
                             );
                           },
                           child: Row(
@@ -1039,7 +706,9 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
                           children: [
                             Flexible(
                               child: Text(
-                                data['name'] ?? '',
+                                data['name'] is String
+                                    ? data['name'] as String
+                                    : '',
                                 style: const TextStyle(
                                   fontSize: 26,
                                   fontWeight: FontWeight.bold,
@@ -1060,101 +729,50 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
                                 ),
                               ),
                             ],
-
-                            // 💡 いいねボタン：年齢の右隣に配置（カウント表示なし）。
-                            //    自分自身のプロフィール、またはブロック関係にある場合は非表示
-                            if (!isMyProfile) _buildLikeSection(),
-
+                            if (!_isMyProfile) _buildLikeButton(),
                             if (_hasValue(data['gender'])) ...[
                               const SizedBox(width: 8),
-                              Builder(
-                                builder: (context) {
-                                  final gender = data['gender'];
-                                  final Color bgColor = gender == '男性'
-                                      ? Colors.blue.withOpacity(0.15)
-                                      : (gender == '女性'
-                                            ? Colors.pink.withOpacity(0.15)
-                                            : Colors.grey.withOpacity(0.15));
-                                  final Color iconColor = gender == '男性'
-                                      ? Colors.blue
-                                      : (gender == '女性'
-                                            ? Colors.pink
-                                            : Colors.grey);
-                                  final IconData iconData = gender == '男性'
-                                      ? Icons.male
-                                      : (gender == '女性'
-                                            ? Icons.female
-                                            : Icons.transgender);
-
-                                  return Container(
-                                    padding: const EdgeInsets.all(4),
-                                    decoration: BoxDecoration(
-                                      color: bgColor,
-                                      shape: BoxShape.circle,
-                                    ),
-                                    child: Icon(
-                                      iconData,
-                                      color: iconColor,
-                                      size: 16,
-                                    ),
-                                  );
-                                },
-                              ),
+                              _GenderBadge(gender: data['gender'].toString()),
                             ],
                           ],
                         ),
                       ],
                     ),
                   ),
-                  if (data['tags'] != null && (data['tags'] as List).isNotEmpty)
+                  if (tags.isNotEmpty)
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 16),
                       child: Wrap(
                         spacing: 6.0,
-                        children: (data['tags'] as List)
-                            .map(
-                              (tag) => _buildTag(tag.toString(), AppColors.tag),
-                            )
+                        children: tags
+                            .map((t) => _buildTag(t.toString(), AppColors.tag))
                             .toList(),
                       ),
                     ),
-
-                  // 💡 「趣味・好きなもの」→「好きなこと（趣味）」に名称変更
                   if (_hasValue(data['hobby'])) ...[
                     _buildSectionTitle('好きなこと・趣味'),
                     _buildContent(data['hobby']),
                   ],
-
-                  // 💡 「趣味・好きなものの詳細」を削除し、「最近特にハマってること」に置き換え
                   if (_hasValue(data['recentInterest'])) ...[
                     _buildSectionTitle('最近特にハマってること'),
                     _buildContent(data['recentInterest']),
                   ],
-
                   if (_hasValue(data['idealFriend'])) ...[
                     _buildSectionTitle('どんな友達を作りたい？'),
                     _buildContent(data['idealFriend']),
                   ],
-
-                  // 💡 「休日の過ごし方」欄を新規追加（任意）
                   if (_hasValue(data['holidayActivity'])) ...[
                     _buildSectionTitle('休日の過ごし方'),
                     _buildContent(data['holidayActivity']),
                   ],
-
-                  // 💡 「NGなこと・苦手なこと」欄を新規追加（任意）
                   if (_hasValue(data['ngThings'])) ...[
                     _buildSectionTitle('NGなこと・苦手なこと'),
                     _buildContent(data['ngThings']),
                   ],
-
-                  // 基本情報（性別・居住地のみ）
                   if (basicInfoTiles.isNotEmpty) ...[
                     _buildSectionTitle('基本情報'),
                     _buildInfoContainer(basicInfoTiles),
                   ],
-
-                  // 💡 ライフスタイル・価値観シート
                   if (valuesData.isNotEmpty) ...[
                     _buildSectionTitle('ライフスタイル・価値観シート'),
                     _buildInfoContainer(
@@ -1177,77 +795,147 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
           ],
         ),
       ),
-      bottomNavigationBar: Container(
-        padding: const EdgeInsets.fromLTRB(15, 25, 15, 0),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.05),
-              blurRadius: 10,
-              offset: const Offset(0, -5),
+      bottomNavigationBar: _isMyProfile ? null : _buildTalkBar(),
+    );
+  }
+
+  Widget _buildNotice(String text) {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.grey[100],
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.block, size: 18, color: Colors.grey[600]),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              text,
+              style: TextStyle(fontSize: 12, color: Colors.grey[700]),
             ),
-          ],
-        ),
-        child: SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(15, 0, 15, 0),
-            child: SizedBox(
-              width: double.infinity,
-              height: 54,
-              // 💡 情報をロード中はインジケータ等を表示、完了したらプラン別制限判定付きのボタンを表示
-              child: _isLoadingLimits
-                  ? const Center(child: CircularProgressIndicator())
-                  : ElevatedButton.icon(
-                      icon: const Icon(Icons.send, color: Colors.white),
-                      label: Text(
-                        _isBlockedRelationship
-                            ? '利用できません'
-                            : (_isMyNameMissing
-                                  ? 'プロフィール未設定です'
-                                  : (isMonthlyLimitReached
-                                        ? '今月のトーク開始上限です'
-                                        : 'トークする')),
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 16,
-                        ),
-                      ),
-                      // 💡 1. 自分のプロフィール、または相手とブロック関係の場合はボタン無効
-                      // 💡 2. 自分のニックネームが未設定の場合は、プロフィール編集画面へ誘導
-                      // 💡 3. 新規相手で今月の上限に達している場合はプラン案内ダイアログを表示
-                      onPressed: (isMyProfile || _isBlockedRelationship)
-                          ? null
-                          : (_isMyNameMissing
-                                ? _showProfileIncompleteDialog // タップ時にプロフィール編集へ誘導
-                                : (isMonthlyLimitReached
-                                      ? () =>
-                                            _showLimitReachedDialog(
-                                              _allowedLimit,
-                                            ) // タップ時にプラン案内ダイアログを表示
-                                      : _handleTalkTransition)), // 正常時
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor:
-                            (isMonthlyLimitReached ||
-                                _isBlockedRelationship ||
-                                _isMyNameMissing)
-                            ? Colors.grey[400]
-                            : AppColors.point,
-                        elevation: 0,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(30),
-                        ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // 💡 いいねボタン：自分の「いいねした」サブコレクションに相手がいるかで表示する
+  Widget _buildLikeButton() {
+    if (_likeStream == null || _isBlockedRelationship || !_peerExists) {
+      return const SizedBox.shrink();
+    }
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: _likeStream,
+      builder: (context, snap) {
+        final bool isLiked = _optimisticLiked ?? (snap.data?.exists ?? false);
+        return Padding(
+          padding: const EdgeInsets.only(left: 10),
+          child: GestureDetector(
+            onTap: _togglingLike ? null : () => _toggleLike(isLiked),
+            child: Icon(
+              isLiked ? Icons.thumb_up_alt : Icons.thumb_up_alt_outlined,
+              color: const Color(0xFFFF8A80),
+              size: 24,
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildTalkBar() {
+    final bool disabled = !_peerExists || _isBlockedRelationship;
+
+    final String label = !_peerExists
+        ? '利用できません'
+        : _isBlockedRelationship
+        ? '利用できません'
+        : _nameMissing
+        ? 'プロフィール未設定です'
+        : _isMonthlyLimitReached
+        ? '今月のトーク開始上限です'
+        : 'トークする';
+
+    final VoidCallback? onPressed = disabled || _startingTalk
+        ? null
+        : _nameMissing
+        ? _showProfileIncompleteDialog
+        : _isMonthlyLimitReached
+        ? () => _showLimitReachedDialog(_monthlyLimit ?? 0)
+        : _startTalk;
+
+    final bool grey = disabled || _nameMissing || _isMonthlyLimitReached;
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(15, 25, 15, 0),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.05),
+            blurRadius: 10,
+            offset: const Offset(0, -5),
+          ),
+        ],
+      ),
+      child: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 15),
+          child: SizedBox(
+            width: double.infinity,
+            height: 54,
+            child: _loadingState
+                ? const Center(child: CircularProgressIndicator())
+                : ElevatedButton.icon(
+                    icon: _startingTalk
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          )
+                        : const Icon(Icons.send, color: Colors.white),
+                    label: Text(
+                      label,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 16,
                       ),
                     ),
-            ),
+                    onPressed: onPressed,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: grey
+                          ? Colors.grey[400]
+                          : AppColors.point,
+                      disabledBackgroundColor: Colors.grey[400],
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(30),
+                      ),
+                    ),
+                  ),
           ),
         ),
       ),
     );
   }
 
-  // --- ヘルパー関数 ---
+  // --- ヘルパー ---
+  bool _hasValue(dynamic value) {
+    if (value == null) return false;
+    final s = value.toString().trim();
+    return s.isNotEmpty && s != '未設定' && s != '未入力';
+  }
+
+  String _shortId(String id) => id.length >= 8 ? id.substring(0, 8) : id;
+
   Widget _buildSectionTitle(String title) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 24, 16, 8),
@@ -1295,7 +983,7 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
     return ListTile(
       visualDensity: const VisualDensity(horizontal: 0, vertical: -4),
       minVerticalPadding: 0,
-      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 0),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16),
       leading: Icon(icon, color: Colors.blueGrey, size: 20),
       title: Text(
         label,
@@ -1306,9 +994,7 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
         style: TextStyle(
           fontSize: 15,
           fontWeight: isValueSheet ? FontWeight.bold : FontWeight.w500,
-          color: isValueSheet
-              ? AppColors.point
-              : Colors.black87, // 💡 価値観シート用カラー調整
+          color: isValueSheet ? AppColors.point : Colors.black87,
         ),
       ),
     );
@@ -1323,25 +1009,205 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> {
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
     );
   }
+}
 
-  // --- バックエンド処理 ---
+// ----------------------------------------------------------------------------
+// 性別バッジ
+// ----------------------------------------------------------------------------
+class _GenderBadge extends StatelessWidget {
+  const _GenderBadge({required this.gender});
+  final String gender;
 
-  Future<void> _addFootprint() async {
-    final String? myId = FirebaseAuth.instance.currentUser?.uid;
-    final String peerId = widget.userId;
-    if (myId == null || myId == peerId) return;
+  @override
+  Widget build(BuildContext context) {
+    final Color base = gender == '男性'
+        ? Colors.blue
+        : (gender == '女性' ? Colors.pink : Colors.grey);
+    final IconData icon = gender == '男性'
+        ? Icons.male
+        : (gender == '女性' ? Icons.female : Icons.transgender);
+
+    return Container(
+      padding: const EdgeInsets.all(4),
+      decoration: BoxDecoration(
+        color: base.withValues(alpha: 0.15),
+        shape: BoxShape.circle,
+      ),
+      child: Icon(icon, color: base, size: 16),
+    );
+  }
+}
+
+// ----------------------------------------------------------------------------
+// 通報ダイアログ（二重送信防止・同じ相手への連投防止つき）
+// ----------------------------------------------------------------------------
+class _ReportDialog extends StatefulWidget {
+  const _ReportDialog({
+    required this.reporterId,
+    required this.peerId,
+    required this.peerName,
+  });
+
+  final String reporterId;
+  final String peerId;
+  final String peerName;
+
+  @override
+  State<_ReportDialog> createState() => _ReportDialogState();
+}
+
+class _ReportDialogState extends State<_ReportDialog> {
+  final TextEditingController _controller = TextEditingController();
+  bool _submitting = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    final reason = _controller.text.trim();
+    if (reason.isEmpty || _submitting) return;
+
+    setState(() {
+      _submitting = true;
+      _error = null;
+    });
 
     try {
-      final peerDoc = FirebaseFirestore.instance
-          .collection('users')
-          .doc(peerId);
-      await peerDoc
-          .update({
-            'footprints': FieldValue.arrayUnion([myId]),
+      await _db
+          .collection('reports')
+          .doc('${widget.reporterId}_${widget.peerId}')
+          .set({
+            'reporterId': widget.reporterId,
+            'reportedId': widget.peerId,
+            'reason': reason,
+            'createdAt': FieldValue.serverTimestamp(),
           })
-          .timeout(_networkTimeout);
+          .timeout(_kNetworkTimeout);
+      if (mounted) Navigator.pop(context, true);
+    } on FirebaseException catch (e) {
+      debugPrint('通報送信エラー: $e');
+      if (!mounted) return;
+      setState(() {
+        _submitting = false;
+        _error = e.code == 'permission-denied'
+            ? 'このユーザーは既に通報済みです。'
+            : '通報の送信に失敗しました。もう一度お試しください。';
+      });
     } catch (e) {
-      debugPrint('足跡の記録に失敗しました: $e');
+      debugPrint('通報送信エラー: $e');
+      if (!mounted) return;
+      setState(() {
+        _submitting = false;
+        _error = _errorMessage(e, '通報の送信に失敗しました。もう一度お試しください。');
+      });
     }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: Colors.white,
+      surfaceTintColor: Colors.white,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+      title: Text(
+        '${widget.peerName} さんを通報',
+        textAlign: TextAlign.center,
+        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+      ),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Text(
+            '不適切な言動や規約違反がありましたか？\n理由を詳しく教えてください。',
+            style: TextStyle(fontSize: 12, color: Colors.grey, height: 1.5),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 20),
+          TextField(
+            controller: _controller,
+            enabled: !_submitting,
+            maxLines: 4,
+            maxLength: 500,
+            style: const TextStyle(fontSize: 14),
+            decoration: InputDecoration(
+              hintText: '通報理由を入力...',
+              filled: true,
+              fillColor: Colors.grey[50],
+              contentPadding: const EdgeInsets.all(16),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(16),
+                borderSide: BorderSide(color: Colors.grey[200]!),
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(16),
+                borderSide: const BorderSide(
+                  color: Colors.redAccent,
+                  width: 1.5,
+                ),
+              ),
+            ),
+          ),
+          if (_error != null) ...[
+            const SizedBox(height: 8),
+            Text(
+              _error!,
+              style: const TextStyle(color: Colors.redAccent, fontSize: 12),
+            ),
+          ],
+        ],
+      ),
+      actionsPadding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+      actions: [
+        Row(
+          children: [
+            Expanded(
+              child: TextButton(
+                onPressed: _submitting
+                    ? null
+                    : () => Navigator.pop(context, false),
+                child: const Text(
+                  'キャンセル',
+                  style: TextStyle(
+                    color: Colors.grey,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: ElevatedButton(
+                onPressed: _submitting ? null : _submit,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.redAccent,
+                  foregroundColor: Colors.white,
+                  disabledBackgroundColor: Colors.grey[300],
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                child: _submitting
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Text(
+                        '通報する',
+                        style: TextStyle(fontWeight: FontWeight.bold),
+                      ),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
   }
 }

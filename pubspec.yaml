@@ -44,9 +44,10 @@ dependencies:
   in_app_review: ^2.0.9
   google_sign_in: ^6.2.1
   sign_in_with_apple: ^6.1.1
-  crypto: ^3.0.3 
+  crypto: ^3.0.3
   image_picker: ^1.0.7
   cloud_functions: ^6.5.1
+  firebase_app_check: ^0.4.9
 
 dev_dependencies:
   flutter_test:

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
@@ -231,31 +232,20 @@ class _IdentityVerificationScreenState
     }
 
     // ==========================================
-    // STEP 2: Firestore に提出記録を保存
+    // STEP 2: サーバーに提出を知らせる
     // ==========================================
-    //    - verification_requests/{uid}：画像の保存場所（本人も含めて誰も読めない。運営がコンソールで確認）
-    //    - users/{uid}：審査状況（「審査中」にする）
-    //    2つを同時に書き込み、片方だけ保存される状態を防ぐ
+    //    💡 審査状況（ageVerified）はアプリから書き換えられないようにしている。
+    //       アプリから書けると、自分で「承認済み」にして年齢確認をすり抜けられてしまうため。
+    //       サーバー（submitVerification）が画像の存在と形式を確認してから「審査中」にする
     try {
       if (mounted) setState(() => _uploadProgress = null);
 
-      final db = FirebaseFirestore.instance;
-      final batch = db.batch();
-
-      batch.set(db.collection('verification_requests').doc(uid), {
-        'imagePath': storagePath,
-        'submittedAt': FieldValue.serverTimestamp(),
-      });
-
-      batch.set(db.collection('users').doc(uid), {
-        'ageVerified': 'pending',
-        'verificationSubmittedAt': FieldValue.serverTimestamp(),
-        'verificationRejectionReason': '',
-        // 💡 以前のバージョンで保存していた、誰でも見られる身分証のURLを消す
-        'verificationImageUrl': FieldValue.delete(),
-      }, SetOptions(merge: true));
-
-      await batch.commit().timeout(_networkTimeout);
+      await FirebaseFunctions.instanceFor(region: 'asia-northeast1')
+          .httpsCallable(
+            'submitVerification',
+            options: HttpsCallableOptions(timeout: _networkTimeout),
+          )
+          .call();
 
       if (!mounted) return;
       setState(() {
@@ -264,10 +254,17 @@ class _IdentityVerificationScreenState
         _isLoading = false;
       });
       _showSnackBar('身分証を提出しました。確認完了までしばらくお待ちください。', Colors.green);
+    } on FirebaseFunctionsException catch (e) {
+      debugPrint('提出エラー: ${e.code} ${e.message}');
+      _handleSubmitFailure(
+        e.code == 'invalid-argument' || e.code == 'failed-precondition'
+            ? (e.message ?? '送信中にエラーが発生しました。もう一度お試しください。')
+            : '送信中にエラーが発生しました。もう一度お試しください。',
+      );
     } on TimeoutException {
       _handleSubmitFailure('通信がタイムアウトしました。電波の良い場所で、もう一度お試しください。');
     } catch (e) {
-      debugPrint('Firestore更新エラー: $e');
+      debugPrint('提出エラー: $e');
       _handleSubmitFailure('送信中にエラーが発生しました。もう一度お試しください。');
     }
   }

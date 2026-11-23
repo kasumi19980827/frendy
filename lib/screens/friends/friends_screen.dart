@@ -379,7 +379,7 @@ class _FriendsScreenState extends State<FriendsScreen> {
           lockedTitle: 'いいねは非表示中です',
           lockedMessage:
               '現在のプランでは、いいねをくれた相手はモザイク表示になっています。\n\n'
-              '『スタンダードプラン』以降に登録すると、いいねをくれた相手をすべて確認できるようになります。',
+              '『ライトプラン』以降に登録すると、いいねをくれた相手をすべて確認できるようになります。',
           onOpenProfile: _openProfile,
         );
       case _Menu.footprints:

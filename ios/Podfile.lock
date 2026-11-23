@@ -1214,6 +1214,9 @@ PODS:
     - Firebase/Functions (= 12.19.3)
     - firebase_core
     - Flutter
+  - Firebase/AppCheck (12.19.3):
+    - Firebase/CoreOnly
+    - FirebaseAppCheck (~> 12.19.0)
   - Firebase/Auth (12.19.3):
     - Firebase/CoreOnly
     - FirebaseAuth (~> 12.19.0)
@@ -1228,6 +1231,11 @@ PODS:
   - Firebase/Storage (12.19.3):
     - Firebase/CoreOnly
     - FirebaseStorage (~> 12.19.0)
+  - firebase_app_check (0.4.9):
+    - Firebase/AppCheck (~> 12.19.3)
+    - Firebase/CoreOnly (~> 12.19.3)
+    - firebase_core
+    - Flutter
   - firebase_auth (6.7.1):
     - Firebase/Auth (= 12.19.3)
     - firebase_core
@@ -1239,6 +1247,12 @@ PODS:
     - Firebase/Storage (= 12.19.3)
     - firebase_core
     - Flutter
+  - FirebaseAppCheck (12.19.0):
+    - AppCheckCore (~> 11.3)
+    - FirebaseAppCheckInterop (~> 12.19.0)
+    - FirebaseCore (~> 12.19.0)
+    - GoogleUtilities/Environment (~> 8.1)
+    - GoogleUtilities/UserDefaults (~> 8.1)
   - FirebaseAppCheckInterop (12.19.0)
   - FirebaseAuth (12.19.0):
     - FirebaseAppCheckInterop (~> 12.19.0)
@@ -1456,6 +1470,7 @@ PODS:
 DEPENDENCIES:
   - cloud_firestore (from `.symlinks/plugins/cloud_firestore/ios`)
   - cloud_functions (from `.symlinks/plugins/cloud_functions/ios`)
+  - firebase_app_check (from `.symlinks/plugins/firebase_app_check/ios`)
   - firebase_auth (from `.symlinks/plugins/firebase_auth/ios`)
   - firebase_core (from `.symlinks/plugins/firebase_core/ios`)
   - firebase_storage (from `.symlinks/plugins/firebase_storage/ios`)
@@ -1474,6 +1489,7 @@ SPEC REPOS:
     - AppCheckCore
     - BoringSSL-GRPC
     - Firebase
+    - FirebaseAppCheck
     - FirebaseAppCheckInterop
     - FirebaseAuth
     - FirebaseAuthInterop
@@ -1503,6 +1519,8 @@ EXTERNAL SOURCES:
     :path: ".symlinks/plugins/cloud_firestore/ios"
   cloud_functions:
     :path: ".symlinks/plugins/cloud_functions/ios"
+  firebase_app_check:
+    :path: ".symlinks/plugins/firebase_app_check/ios"
   firebase_auth:
     :path: ".symlinks/plugins/firebase_auth/ios"
   firebase_core:
@@ -1532,9 +1550,11 @@ SPEC CHECKSUMS:
   cloud_firestore: 80cb65a08f881ca2c811dce631cd3fd1120c25e0
   cloud_functions: aed2c977869e57132b87fe398a6fa0f365efeb27
   Firebase: e3c5ab38229ae085490d02398d97b9f5374bbe6e
+  firebase_app_check: ab3910825730b74e9ba24f58ecd294c946a7109a
   firebase_auth: 749e959255e42e6ca6ec2ecc83a0e1ce55d384fe
   firebase_core: 4d065e808a89f0eaa0df16660666783f9ea13d38
   firebase_storage: 8ea03b6c6623411cd9995b2950e3b6fe7f256afa
+  FirebaseAppCheck: d8e84486d3502e42f7807e05562605d800043e5b
   FirebaseAppCheckInterop: bd4b791ffaed7ae719304af6369d243ddee5e4a0
   FirebaseAuth: 8c38236f67e5e3dd6aacf3e0c46b3eed31e9c820
   FirebaseAuthInterop: f1ad187a0052276ad49a990538accfdf36fc595d

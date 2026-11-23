@@ -1,25 +1,58 @@
-import 'package:flutter/material.dart';
+import 'package:firebase_app_check/firebase_app_check.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
-import 'package:firebase_auth/firebase_auth.dart'; // 1. 追加
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:matching_app/constants/app_colors.dart';
 import 'package:matching_app/screens/auth/email_verification_pending_screen.dart';
-import 'firebase_options.dart';
-
-// 各画面のインポート（既存のもの）
+import 'package:matching_app/screens/auth/login_screen.dart';
 import 'package:matching_app/screens/friends/friends_screen.dart';
 import 'package:matching_app/screens/home/home_screen.dart';
-import 'package:matching_app/screens/talk/message_screen.dart';
 import 'package:matching_app/screens/mypage/mypage_screen.dart';
 import 'package:matching_app/screens/search/search_screen.dart';
-import 'package:matching_app/screens/auth/login_screen.dart'; // 2. 追加
-import 'package:matching_app/constants/app_colors.dart';
-import 'package:flutter/services.dart';
+import 'package:matching_app/screens/talk/message_screen.dart';
+
+import 'firebase_options.dart';
 
 final GlobalKey<ScaffoldMessengerState> scaffoldMessengerKey =
     GlobalKey<ScaffoldMessengerState>();
 
+// 💡 メールアドレスの確認をプロバイダ側で済ませているログイン方法
+//    （Apple は「メールを非公開」でも Apple が中継アドレスを保証している）
+const Set<String> _trustedProviders = {'google.com', 'apple.com'};
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+
+  // 💡 App Check：Firebase の各サービスを使う前に有効化する。
+  //    本物のアプリからのリクエストだけを受け付けるようにし、
+  //    改造アプリやスクリプトからの Cloud Functions 呼び出しを防ぐ。
+  //    デバッグ実行時はログに出るデバッグトークンを
+  //    Firebase コンソール「App Check → アプリ → デバッグトークンを管理」に登録すること
+  await FirebaseAppCheck.instance.activate(
+    providerAndroid: kDebugMode
+        ? const AndroidDebugProvider()
+        : const AndroidPlayIntegrityProvider(),
+    providerApple: kDebugMode
+        ? const AppleDebugProvider()
+        : const AppleAppAttestProvider(),
+  );
+
+  // 💡 開発中だけ、起動直後に App Check の証明書を取りに行く。
+  //    これにより、Xcode のコンソールに「Debug Token」が起動時すぐに表示される。
+  //    （トークン未登録の間は失敗するが、アプリの起動は止めない）
+  if (kDebugMode) {
+    try {
+      await FirebaseAppCheck.instance.getToken().timeout(
+        const Duration(seconds: 5),
+      );
+      debugPrint('App Check: 証明書の取得に成功しました');
+    } catch (e) {
+      debugPrint('App Check: 証明書を取得できませんでした（デバッグトークン未登録の可能性）: $e');
+    }
+  }
 
   await SystemChrome.setPreferredOrientations([
     DeviceOrientation.portraitUp,
@@ -50,7 +83,6 @@ class MyApp extends StatelessWidget {
           ),
         ),
       ),
-      // main.dart の StreamBuilder 部分を以下のように修正
       home: StreamBuilder<User?>(
         stream: FirebaseAuth.instance.authStateChanges(),
         builder: (context, snapshot) {
@@ -61,22 +93,18 @@ class MyApp extends StatelessWidget {
           }
 
           final user = snapshot.data;
+          if (user == null) return const LoginScreen();
 
-          if (user != null) {
-            // 💡 ここを修正
-            // Googleログイン（google.com）の場合はメール認証チェックをスキップする
-            bool isGoogleUser = user.providerData.any(
-              (info) => info.providerId == 'google.com',
-            );
+          final bool isTrustedProvider = user.providerData.any(
+            (info) => _trustedProviders.contains(info.providerId),
+          );
 
-            if (isGoogleUser || user.emailVerified) {
-              return const MyHomePage();
-            } else {
-              return const EmailVerificationPendingScreen();
-            }
+          if (isTrustedProvider || user.emailVerified) {
+            // 💡 ユーザーIDをキーにすることで、アカウントが切り替わったときに
+            //    画面の状態（前のユーザーの友達一覧など）を必ず作り直す
+            return MyHomePage(key: ValueKey(user.uid));
           }
-
-          return const LoginScreen();
+          return const EmailVerificationPendingScreen();
         },
       ),
     );
@@ -98,13 +126,12 @@ class _MyHomePageState extends State<MyHomePage> {
   @override
   void initState() {
     super.initState();
-    // 💡 広場機能を削除したため、PlazaScreenをリストから除外
-    _pages = [
-      const HomeScreen(),
-      const SearchScreen(),
-      const MessageScreen(),
-      const FriendsScreen(),
-      const MypageScreen(),
+    _pages = const [
+      HomeScreen(),
+      SearchScreen(),
+      MessageScreen(),
+      FriendsScreen(),
+      MypageScreen(),
     ];
   }
 
@@ -119,7 +146,6 @@ class _MyHomePageState extends State<MyHomePage> {
         selectedItemColor: AppColors.point,
         unselectedItemColor: AppColors.txt,
         items: const [
-          // 💡 「広場」タブを削除
           BottomNavigationBarItem(icon: Icon(Icons.home), label: 'ホーム'),
           BottomNavigationBarItem(icon: Icon(Icons.search), label: '探す'),
           BottomNavigationBarItem(icon: Icon(Icons.forum), label: 'トーク'),
