@@ -18,6 +18,27 @@ const int _kGoldBadgePeers = 10;
 const Color _kSilverColor = Color(0xFF9E9E9E);
 const Color _kGoldColor = Color(0xFFFFB300);
 
+// 友達招待の条件（index.ts の INVITE_REDEEM_WINDOW_DAYS・INVITER_REWARD_LIMIT とそろえる）
+const int _kInviteRedeemWindowDays = 7;
+const int _kInviterRewardLimit = 3;
+
+// 無料体験中のプラン（'light' または 'premium'。無料体験中でなければ null）
+String? _trialPlan(Map<String, dynamic> data) {
+  if (_trialDaysLeft(data) == null) return null;
+  final plan = data['plan'];
+  return plan is String ? plan : null;
+}
+
+// 無料体験の残り日数（無料体験中でなければ null）
+int? _trialDaysLeft(Map<String, dynamic> data) {
+  if (data['planSource'] != 'trial') return null;
+  final expires = data['planExpiresAt'];
+  if (expires is! Timestamp) return null;
+  final diff = expires.toDate().difference(DateTime.now());
+  if (diff.isNegative) return null;
+  return (diff.inHours / 24).ceil();
+}
+
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -152,6 +173,7 @@ class _HomeScreenState extends State<HomeScreen> {
             const SizedBox(height: 18),
 
             // --- バナー ---
+            _buildWelcomeTrialBanner(),
             _buildInviteBanner(),
             const SizedBox(height: 12),
             _buildStoreReviewBanner(),
@@ -452,6 +474,87 @@ class _HomeScreenState extends State<HomeScreen> {
   // 友達招待
   // ==========================================================================
   Widget _buildInviteBanner() {
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: _myStream,
+      builder: (context, snapshot) {
+        final data = snapshot.data?.data() ?? const <String, dynamic>{};
+        // 招待バナーには、プレミアムの無料体験中のときだけ残り日数を出す
+        final days = _trialPlan(data) == 'premium'
+            ? _trialDaysLeft(data)
+            : null;
+        return _buildInviteBannerBody(days);
+      },
+    );
+  }
+
+  // ==========================================================================
+  // 新規登録の特典（はじめの1ヶ月はライトプランが無料）
+  // 💡 ライトプランの無料体験中だけ表示する
+  // ==========================================================================
+  Widget _buildWelcomeTrialBanner() {
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: _myStream,
+      builder: (context, snapshot) {
+        final data = snapshot.data?.data() ?? const <String, dynamic>{};
+        if (_trialPlan(data) != 'light') return const SizedBox.shrink();
+        final days = _trialDaysLeft(data)!;
+        final until = (data['planExpiresAt'] as Timestamp).toDate();
+
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 12),
+          child: Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: const Color(0xFFFF9800).withValues(alpha: 0.10),
+              borderRadius: BorderRadius.circular(15),
+              border: Border.all(
+                color: const Color(0xFFFF9800).withValues(alpha: 0.4),
+                width: 1.5,
+              ),
+            ),
+            child: Row(
+              children: [
+                const Icon(
+                  Icons.celebration_rounded,
+                  color: Color(0xFFFF9800),
+                  size: 36,
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'ライトプラン無料体験中（あと$days日）',
+                        style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 15,
+                          color: Colors.black87,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        'はじめの1ヶ月の特典です（${until.month}月${until.day}日まで）。'
+                        '月15人までトークを始められて、足跡・いいねをくれた人も見られます。',
+                        style: const TextStyle(
+                          color: Colors.black54,
+                          fontSize: 12,
+                          height: 1.4,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildInviteBannerBody(int? trialDaysLeft) {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(16),
@@ -467,21 +570,28 @@ class _HomeScreenState extends State<HomeScreen> {
         children: [
           const Icon(Icons.stars, color: Colors.white, size: 40),
           const SizedBox(width: 16),
-          const Expanded(
+          Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  '友達招待で１ヶ月プレミアム無料体験！',
+                const Text(
+                  '友達招待で2人とも1ヶ月プレミアム無料！',
                   style: TextStyle(
                     color: Colors.white,
                     fontWeight: FontWeight.bold,
                     fontSize: 15,
                   ),
                 ),
+                const SizedBox(height: 2),
                 Text(
-                  'あなたの友達も１ヶ月プレムアム無料体験が楽しめます！',
-                  style: TextStyle(color: Colors.white, fontSize: 12),
+                  trialDaysLeft != null
+                      ? '🎉 プレミアム無料体験中（あと$trialDaysLeft日）'
+                      : '友達が年齢確認を完了すると、あなたも友達も1ヶ月無料に！',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 12,
+                    height: 1.4,
+                  ),
                 ),
               ],
             ),
@@ -530,13 +640,21 @@ class _HomeScreenState extends State<HomeScreen> {
       context: context,
       backgroundColor: Colors.transparent,
       isScrollControlled: true,
-      builder: (sheetContext) => _InviteSheet(
-        codeFuture: _inviteCodeFuture!,
-        onRetry: () {
-          Navigator.pop(sheetContext);
-          setState(() => _inviteCodeFuture = null);
-          _showInviteDetails();
-        },
+      // 💡 招待コードの入力欄でキーボードが出ても隠れないよう、下に余白をとってスクロールできるようにする
+      builder: (sheetContext) => Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.viewInsetsOf(sheetContext).bottom,
+        ),
+        child: SingleChildScrollView(
+          child: _InviteSheet(
+            codeFuture: _inviteCodeFuture!,
+            onRetry: () {
+              Navigator.pop(sheetContext);
+              setState(() => _inviteCodeFuture = null);
+              _showInviteDetails();
+            },
+          ),
+        ),
       ),
     );
   }
@@ -817,7 +935,7 @@ class _InviteSheetState extends State<_InviteSheet> {
                 ),
                 SizedBox(height: 8),
                 Text(
-                  'あなたと友達のどちらも、全ての機能が使える「プレミアムプラン」を1ヶ月間無料で楽しめます。',
+                  '招待した友達が年齢確認を完了すると、あなたと友達のどちらも「プレミアムプラン」を1ヶ月間無料で楽しめます。',
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     fontSize: 13,
@@ -907,7 +1025,22 @@ class _InviteSheetState extends State<_InviteSheet> {
               );
             },
           ),
-          const SizedBox(height: 32),
+          const SizedBox(height: 12),
+          Text(
+            '※ 友達には、登録してから$_kInviteRedeemWindowDays日以内に、このコードを入力してもらってください。\n'
+            '※ あなたが受け取れる特典は、$_kInviterRewardLimit回（3ヶ月分）までです。\n'
+            '※ すでにストアでプレミアムプランをご契約中の方には、特典はつきません。',
+            style: TextStyle(
+              fontSize: 11,
+              color: Colors.grey[600],
+              height: 1.6,
+            ),
+          ),
+          const SizedBox(height: 20),
+          const Divider(),
+          const SizedBox(height: 12),
+          const _RedeemSection(),
+          const SizedBox(height: 24),
           SizedBox(
             width: double.infinity,
             height: 54,
@@ -930,6 +1063,222 @@ class _InviteSheetState extends State<_InviteSheet> {
           SizedBox(height: MediaQuery.of(context).padding.bottom),
         ],
       ),
+    );
+  }
+}
+
+// ----------------------------------------------------------------------------
+// 招待コードを入力する欄（招待された人用）
+// ----------------------------------------------------------------------------
+class _RedeemSection extends StatefulWidget {
+  const _RedeemSection();
+
+  @override
+  State<_RedeemSection> createState() => _RedeemSectionState();
+}
+
+class _RedeemSectionState extends State<_RedeemSection> {
+  final TextEditingController _controller = TextEditingController();
+  bool _loading = true;
+  bool _submitting = false;
+  String _status =
+      ''; // '' = 未入力 / 'pending' = 入力済み・年齢確認待ち / 'rewarded' = 受け取り済み
+  String? _error;
+
+  // 💡 入力できるのは登録から7日以内（最終的な判定はサーバーで行う）
+  bool get _withinWindow {
+    final created = FirebaseAuth.instance.currentUser?.metadata.creationTime;
+    if (created == null) return false;
+    return DateTime.now().difference(created).inDays < _kInviteRedeemWindowDays;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _loadStatus();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadStatus() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) {
+      setState(() => _loading = false);
+      return;
+    }
+    try {
+      final doc = await FirebaseFirestore.instance
+          .collection('invites')
+          .doc(uid)
+          .get()
+          .timeout(_kNetworkTimeout);
+      final status = doc.data()?['status'];
+      if (mounted) {
+        setState(() {
+          _status = status is String ? status : '';
+          _loading = false;
+        });
+      }
+    } catch (e) {
+      debugPrint('招待の状態取得エラー: $e');
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _submit() async {
+    final code = _controller.text.trim().toUpperCase();
+    if (code.isEmpty || _submitting) return;
+    setState(() {
+      _submitting = true;
+      _error = null;
+    });
+    try {
+      final res = await FirebaseFunctions.instanceFor(region: _kFunctionsRegion)
+          .httpsCallable(
+            'redeemInviteCode',
+            options: HttpsCallableOptions(timeout: _kNetworkTimeout),
+          )
+          .call({'code': code});
+      final data = Map<String, dynamic>.from(res.data as Map);
+      if (!mounted) return;
+      setState(
+        () => _status = data['status'] == 'rewarded' ? 'rewarded' : 'pending',
+      );
+    } on FirebaseFunctionsException catch (e) {
+      debugPrint('招待コード入力エラー: ${e.code} ${e.message}');
+      if (!mounted) return;
+      setState(() {
+        _error = switch (e.code) {
+          'invalid-argument' ||
+          'not-found' ||
+          'already-exists' ||
+          'failed-precondition' => e.message ?? '招待コードを確認してください',
+          _ => '通信に失敗しました。もう一度お試しください',
+        };
+      });
+    } catch (e) {
+      debugPrint('招待コード入力エラー: $e');
+      if (mounted) setState(() => _error = '通信に失敗しました。もう一度お試しください');
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
+  }
+
+  Widget _statusBox(IconData icon, Color color, String text) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, color: color),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              text,
+              style: const TextStyle(fontSize: 13, height: 1.5),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loading) return const SizedBox(height: 40);
+
+    if (_status == 'rewarded') {
+      return _statusBox(
+        Icons.celebration,
+        AppColors.point,
+        '招待の特典を受け取りました！プレミアムプランをお楽しみください。',
+      );
+    }
+    if (_status == 'pending') {
+      return _statusBox(
+        Icons.hourglass_top_rounded,
+        Colors.orange,
+        '招待コードは入力済みです。年齢確認が承認されると、あなたと招待してくれた友達に特典がつきます。',
+      );
+    }
+    // 登録から7日を過ぎた人には、入力欄を出さない
+    if (!_withinWindow) return const SizedBox.shrink();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          '招待コードをお持ちの方',
+          style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: _controller,
+                enabled: !_submitting,
+                maxLength: 8,
+                textCapitalization: TextCapitalization.characters,
+                decoration: InputDecoration(
+                  hintText: '8文字のコード',
+                  counterText: '',
+                  errorText: _error,
+                  filled: true,
+                  fillColor: Colors.grey[100],
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 12,
+                  ),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide.none,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            ElevatedButton(
+              onPressed: _submitting ? null : _submit,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.point,
+                foregroundColor: Colors.white,
+                elevation: 0,
+                minimumSize: const Size(72, 48),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+              child: _submitting
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    )
+                  : const Text(
+                      '入力',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        Text(
+          '登録から$_kInviteRedeemWindowDays日以内に入力できます（1回のみ）',
+          style: TextStyle(fontSize: 11, color: Colors.grey[600]),
+        ),
+      ],
     );
   }
 }

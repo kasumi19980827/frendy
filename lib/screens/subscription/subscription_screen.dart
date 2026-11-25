@@ -56,7 +56,7 @@ class _Plan {
   final bool isPopular;
 }
 
-// 💡 料金プラン（2026年11月改定）
+// 💡 料金プラン（2026年11月25日改定）
 //    サーバー側の判定（index.ts の TALK_LIMITS と LOCKED_PLANS）、
 //    特商法表記・Frendyの説明・ヘルプと必ずそろえること
 const List<_Plan> _plans = [
@@ -81,11 +81,11 @@ const List<_Plan> _plans = [
   _Plan(
     id: 'standard',
     name: 'スタンダード',
-    price: 500,
+    price: 480,
     color: Color(0xFF4CAF50),
     isPopular: true,
     features: [
-      _Feature('メッセージ無制限', '人数の上限なく、気になる相手と会話を始められます。'),
+      _Feature('メッセージ最大40人／月', '最大40人の気になる相手と会話を始めることができます。'),
       _Feature('足跡の表示', 'あなたのプロフィールを見た人がわかります。'),
       _Feature('いいねされた人を見れる', 'あなたにいいねしたお相手を確認できます。'),
     ],
@@ -129,6 +129,10 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
 
   int _selectedPlanIndex = 2;
   String _currentPlan = 'free';
+  // 友達招待の無料体験中か（無料体験中は、ストアでの解約は不要）
+  DateTime? _trialUntil;
+  bool get _isTrial => _trialUntil != null;
+  bool get _isPaid => _currentPlan != 'free' && !_isTrial;
   bool _isLoadingPlan = true;
   bool _initialSelectionDone = false;
 
@@ -157,13 +161,32 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
         .snapshots()
         .listen(
           (snap) {
-            final raw = snap.data()?['plan'];
-            final plan = raw is String && _plans.any((p) => p.id == raw)
+            final data = snap.data() ?? const <String, dynamic>{};
+            final raw = data['plan'];
+            String plan = raw is String && _plans.any((p) => p.id == raw)
                 ? raw
                 : 'free';
+
+            // 💡 無料体験中かどうか。期限が過ぎていれば、体験前のプランとして表示する
+            //    （サーバーが1時間ごとに元に戻すので、その間の表示をそろえる）
+            DateTime? trialUntil;
+            if (data['planSource'] == 'trial') {
+              final expires = data['planExpiresAt'];
+              final until = expires is Timestamp ? expires.toDate() : null;
+              if (until != null && until.isAfter(DateTime.now())) {
+                trialUntil = until;
+              } else {
+                final before = data['planBeforeTrial'];
+                plan = before is String && _plans.any((p) => p.id == before)
+                    ? before
+                    : 'free';
+              }
+            }
+
             if (!mounted) return;
             setState(() {
               _currentPlan = plan;
+              _trialUntil = trialUntil;
               _isLoadingPlan = false;
               // 最初の1回だけ、今のプランを選択状態にする
               if (!_initialSelectionDone) {
@@ -205,7 +228,8 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
 
   void _onPlanButtonPressed(_Plan selected) {
     // 有料プランからフリーに戻す・別の有料プランに変える場合は、ストア側で行う
-    if (_currentPlan != 'free') {
+    // （無料体験中の人は、ストアでの手続きは不要）
+    if (_isPaid) {
       _showStoreManageDialog(selected);
       return;
     }
@@ -345,7 +369,7 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
                     _buildActionButton(selected),
 
                     // 有料プランの人には、解約・変更の入り口を常に出しておく
-                    if (_currentPlan != 'free') ...[
+                    if (_isPaid) ...[
                       const SizedBox(height: 12),
                       TextButton.icon(
                         onPressed: _openStoreSubscriptions,
@@ -497,7 +521,9 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
           ),
           Flexible(
             child: Text(
-              _currentPlan == 'free'
+              _isTrial
+                  ? '${_planNameOf(_currentPlan)}プラン無料体験中\n（${_trialUntil!.month}月${_trialUntil!.day}日まで）'
+                  : _currentPlan == 'free'
                   ? 'フリー会員'
                   : '${_planNameOf(_currentPlan)}プラン契約中',
               textAlign: TextAlign.right,
@@ -518,8 +544,8 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
 
     final String label;
     if (isCurrent) {
-      label = '現在のプランです';
-    } else if (_currentPlan != 'free') {
+      label = _isTrial ? '無料体験中です' : '現在のプランです';
+    } else if (_isPaid) {
       label = selected.id == 'free'
           ? 'フリープランに戻す（解約）'
           : '${selected.name}プランに変更する';

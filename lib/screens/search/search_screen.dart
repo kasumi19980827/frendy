@@ -85,13 +85,44 @@ String? _firstImageUrl(Map<String, dynamic> d) {
 List<String> _splitToKeywords(String text) {
   return text
       .split(_kWordSeparator)
-      .map((s) => s.replaceAll(_kEdgeSymbolRe, '').trim().toLowerCase())
+      .map((s) => _normalize(s.replaceAll(_kEdgeSymbolRe, '').trim()))
       .where((s) => s.length >= 2 && !_kIgnoreWords.contains(s))
       .toList();
 }
 
-String _sanitizeQuery(String text) =>
-    text.trim().toLowerCase().replaceAll(_kEdgeSymbolRe, '');
+// 💡 表記ゆれをそろえる
+//    ・英字は小文字に（Pokemon → pokemon）
+//    ・全角英数字は半角に（ＡＢＣ１２３ → abc123）
+//    ・カタカナはひらがなに（ポケモン → ぽけもん）
+//    これで「ぽけもん」でも「ポケモン」でも同じように見つかる
+String _normalize(String text) {
+  final buf = StringBuffer();
+  for (final code in text.runes) {
+    if (code >= 0xFF01 && code <= 0xFF5E) {
+      buf.writeCharCode(code - 0xFEE0); // 全角英数字・記号 → 半角
+    } else if (code >= 0x30A1 && code <= 0x30F6) {
+      buf.writeCharCode(code - 0x60); // カタカナ → ひらがな
+    } else {
+      buf.writeCharCode(code);
+    }
+  }
+  return buf.toString().toLowerCase();
+}
+
+// 検索欄の文字を、スペース（半角・全角）で区切って単語のリストにする
+// 例：「愛知　ぽけもん」→ ['愛知', 'ぽけもん']
+final RegExp _kSpaces = RegExp(r'[\s　]+');
+const int _kMaxSearchWords = 5; // 単語は5個まで（多すぎる入力で重くならないように）
+
+List<String> _searchWords(String text) {
+  return _normalize(text)
+      .split(_kSpaces)
+      .map((w) => w.replaceAll(_kEdgeSymbolRe, '').trim())
+      .where((w) => w.isNotEmpty)
+      .toSet()
+      .take(_kMaxSearchWords)
+      .toList();
+}
 
 class _Candidate {
   const _Candidate(this.id, this.data);
@@ -281,28 +312,33 @@ class _SearchScreenState extends State<SearchScreen> {
     return reason == null;
   }
 
+  // 検索の対象にする項目
+  static const List<String> _kSearchFields = [
+    'name',
+    'location',
+    'hobby',
+    'recentInterest',
+    'idealFriend',
+    'holidayActivity',
+    'tags',
+  ];
+
   // 検索条件（キーワード・年齢・性別・タグ）に合うか
   bool _matchesFilters(Map<String, dynamic> d) {
-    final query = _sanitizeQuery(_searchKeyword);
-    if (query.isNotEmpty) {
-      bool contains(dynamic v) {
-        if (v is String) return v.toLowerCase().contains(query);
-        if (v is List) {
-          return v.whereType<String>().any(
-            (s) => s.toLowerCase().contains(query),
-          );
-        }
-        return false;
+    final words = _searchWords(_searchKeyword);
+    if (words.isNotEmpty) {
+      // 💡 対象の項目をまとめて1つの文章にし、表記ゆれをそろえておく
+      final buf = StringBuffer();
+      for (final field in _kSearchFields) {
+        final v = d[field];
+        if (v is String) buf.write(' $v');
+        if (v is List) buf.write(' ${v.whereType<String>().join(' ')}');
       }
+      final text = _normalize(buf.toString());
 
-      final hit =
-          contains(d['name']) ||
-          contains(d['location']) ||
-          contains(d['hobby']) ||
-          contains(d['recentInterest']) ||
-          contains(d['idealFriend']) ||
-          contains(d['tags']);
-      if (!hit) return false;
+      // 💡 すべての単語が含まれている人だけを表示する（AND検索）
+      //    例：「愛知　ぽけもん」→ 居住地が愛知で、趣味にポケモンがある人
+      if (!words.every(text.contains)) return false;
     }
 
     final age = _ageOf(d);
@@ -329,7 +365,8 @@ class _SearchScreenState extends State<SearchScreen> {
       if (v is String) buffer.write(' $v');
       if (v is List) buffer.write(' ${v.whereType<String>().join(' ')}');
     }
-    final text = buffer.toString().toLowerCase();
+    // 💡 おすすめも、カタカナ・ひらがなの違いを気にせず比べる
+    final text = _normalize(buffer.toString());
     return _myHobbyWords.where(text.contains).length;
   }
 
@@ -1039,7 +1076,7 @@ class _SearchScreenState extends State<SearchScreen> {
                 _scheduleReload(const Duration(milliseconds: 500));
               },
               decoration: InputDecoration(
-                hintText: 'キーワード・IDで検索',
+                hintText: 'キーワードで検索',
                 counterText: '',
                 prefixIcon: const Icon(
                   Icons.search,

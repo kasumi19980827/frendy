@@ -1196,7 +1196,7 @@ class _ActionTile extends StatelessWidget {
                     Text(
                       title,
                       style: const TextStyle(fontWeight: FontWeight.bold),
-                    ),
+                    ), 
                     Text(
                       subtitle,
                       style: TextStyle(fontSize: 12, color: Colors.grey[600]),

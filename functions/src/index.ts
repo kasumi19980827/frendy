@@ -10,11 +10,13 @@ import {
   getFirestore,
   QueryDocumentSnapshot,
   Timestamp,
+  Transaction,
 } from "firebase-admin/firestore";
 import { getStorage } from "firebase-admin/storage";
 import { logger, setGlobalOptions } from "firebase-functions/v2";
-import { onDocumentCreated } from "firebase-functions/v2/firestore";
+import { onDocumentCreated, onDocumentUpdated } from "firebase-functions/v2/firestore";
 import { CallableRequest, HttpsError, onCall } from "firebase-functions/v2/https";
+import { onSchedule } from "firebase-functions/v2/scheduler";
 
 initializeApp();
 const db = getFirestore();
@@ -33,8 +35,8 @@ const FOOTPRINT_THROTTLE_MS = 10 * 60 * 1000; // 同じ相手への足跡は10�
 // 💡 料金プラン（2026年11月改定）
 //   free     … 0円   ：トーク開始 月5人。足跡・いいねはモザイク
 //   light    … 250円 ：トーク開始 月15人。足跡・いいねした人を見られる
-//   standard … 500円 ：トーク開始 無制限。足跡・いいね
-//   premium  … 980円 ：standard ＋ 検索でプロフィール優先表示
+//   standard … 480円 ：トーク開始 月40人。足跡・いいねした人を見られる
+//   premium  … 980円 ：トーク開始 無制限。足跡・いいね ＋ 検索でプロフィール優先表示
 const LOCKED_PLANS: Record<"likedBy" | "footprints", string[]> = {
   likedBy: ["free"],
   footprints: ["free"],
@@ -495,11 +497,25 @@ export const unblockUser = onCall(OPTS, async (req) => {
 // 💡 回数はクライアントから書き換えられない talk_quotas に保存する
 //    （以前は自分の users ドキュメントにあり、自分で0に戻せば上限を無視できた）
 // ---------------------------------------------------------------------------
-const TALK_LIMITS: Record<string, number> = { free: 5, light: 15 }; // それ以外のプランは無制限
+// 💡 月に新しくトークを始められる人数（ここにないプラン＝premium は無制限）
+const TALK_LIMITS: Record<string, number> = { free: 5, light: 15, standard: 40 };
 
 function talkLimitOf(plan: unknown): number | null {
   const p = typeof plan === "string" ? plan : "free";
   return p in TALK_LIMITS ? TALK_LIMITS[p] : null;
+}
+
+// 💡 今の時点で有効なプラン。
+//    無料体験（planSource = "trial"）の期限が過ぎていれば、体験前のプランとして扱う。
+//    期限切れを元に戻すスケジュール関数は1時間ごとなので、その間もずれないようにする
+function effectivePlan(user: DocumentSnapshot): string {
+  const raw = user.get("plan");
+  const plan = typeof raw === "string" ? raw : "free";
+  if (user.get("planSource") !== "trial") return plan;
+  const expires = user.get("planExpiresAt");
+  if (expires instanceof Timestamp && expires.toMillis() > Date.now()) return plan;
+  const before = user.get("planBeforeTrial");
+  return typeof before === "string" ? before : "free";
 }
 
 // 月の区切りは日本時間で判定する
@@ -545,7 +561,7 @@ export const getProfileState = onCall(OPTS, async (req) => {
     canInteract: peer.exists && !myBlock.exists && !peerBlock.exists,
     hasChatHistory: room.exists,
     nameMissing: isNameMissing(me),
-    monthlyLimit: talkLimitOf(me.get("plan")), // null = 無制限
+    monthlyLimit: talkLimitOf(effectivePlan(me)), // null = 無制限
     monthlyUsed: usedThisMonth(quota),
   };
 });
@@ -577,7 +593,7 @@ export const startTalk = onCall(OPTS, async (req) => {
     }
     if (roomSnap.exists) return false; // 以前に話したことがある相手
 
-    const limit = talkLimitOf(me.get("plan"));
+    const limit = talkLimitOf(effectivePlan(me));
     if (limit !== null) {
       const used = usedThisMonth(quota);
       if (used >= limit) {
@@ -749,6 +765,21 @@ export const deleteAccount = onCall(
       // 💡 年齢確認の提出記録（画像の保存場所や確認用リンクを含む）も削除する。
       //    プライバシーポリシーの「退会時に本人確認書類を削除する」と内容をそろえるため
       writer.delete(db.collection("verification_requests").doc(uid));
+      // 招待された記録（自分が招待された側）を消す
+      writer.delete(db.collection("invites").doc(uid));
+      await writer.flush();
+
+      // 自分が招待した人の記録からは、自分のIDだけを消す
+      // （招待された人は、年齢確認が済めば特典を受け取れるようにしておく）
+      const invited = await db
+        .collection("invites")
+        .where("inviterUid", "==", uid)
+        .select()
+        .limit(1000)
+        .get();
+      for (const doc of invited.docs) {
+        writer.update(doc.ref, { inviterUid: FieldValue.delete(), inviterDeleted: true });
+      }
       await writer.flush();
     });
 
@@ -793,8 +824,7 @@ export const getInbox = onCall(OPTS, async (req) => {
 
   // 💡 plan はルールでクライアントから書き換え不可にしている前提
   const me = await userRef(uid).get();
-  const rawPlan = me.get("plan");
-  const plan = typeof rawPlan === "string" ? rawPlan : "free";
+  const plan = effectivePlan(me);
   const locked = LOCKED_PLANS[type].includes(plan);
 
   const col = userRef(uid).collection(type);
@@ -900,3 +930,255 @@ export const submitVerification = onCall(OPTS, async (req) => {
   await batch.commit();
   return { status: "pending" };
 });
+
+
+// ===========================================================================
+// 無料体験（新規登録のライト1ヶ月・友達招待のプレミアム1ヶ月）
+// ===========================================================================
+// 友達招待：2人ともプレミアム1ヶ月無料
+//
+// 流れ
+//  1. 招待された人が redeemInviteCode でコードを入力 → invites/{自分} に記録（pending）
+//  2. 招待された人の年齢確認が承認される（users.ageVerified が verified になる）
+//  3. onUserAgeVerified が検知し、2人にプレミアムを30日間つける（rewarded）
+//  4. expireTrials が1時間ごとに、期限が過ぎた人を体験前のプランに戻す
+//
+// ズル対策
+//  ・特典を渡すのは「年齢確認の承認後」だけ（運営が身分証を確認した実在の人）
+//  ・コード入力は登録から7日以内・1人1回まで、自分のコードは使えない
+//  ・招待した人がもらえる特典は最大3回まで
+//  ・プランに関する項目はすべてサーバーだけが書き込む（ルールで保護）
+// ===========================================================================
+const TRIAL_DAYS = 30;
+const INVITE_REDEEM_WINDOW_DAYS = 7;
+const INVITER_REWARD_LIMIT = 3;
+const INVITE_CODE_RE = new RegExp(`^[${INVITE_ALPHABET}]{${INVITE_LENGTH}}$`);
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// プランの高さ（高いほど機能が多い）
+const PLAN_RANK: Record<string, number> = { free: 0, light: 1, standard: 2, premium: 3 };
+const rankOf = (plan: unknown) => (typeof plan === "string" ? PLAN_RANK[plan] ?? 0 : 0);
+
+// 1人分の無料体験をつける（トランザクションの中で使う）
+//   trialPlan … 無料で使えるようにするプラン（light：新規登録の特典 / premium：友達招待の特典）
+// 戻り値：つけたら true（すでに同じか上のプランを使っている人は false）
+function applyTrial(
+  tx: Transaction,
+  user: DocumentSnapshot,
+  trialPlan: "light" | "premium",
+  days: number = TRIAL_DAYS,
+  extra: Record<string, unknown> = {}, // 同じ書き込みに一緒に入れる項目（同じドキュメントへの二重書き込みを避ける）
+): boolean {
+  if (!user.exists) return false;
+  const now = Date.now();
+  const plan = typeof user.get("plan") === "string" ? (user.get("plan") as string) : "free";
+  const source = user.get("planSource");
+  const expires = user.get("planExpiresAt");
+  const expiresMs = expires instanceof Timestamp ? expires.toMillis() : 0;
+  const inTrial = source === "trial" && expiresMs > now;
+
+  if (inTrial) {
+    // 今の無料体験のほうが上のプランなら、何もしない
+    if (rankOf(plan) > rankOf(trialPlan)) return false;
+    if (plan === trialPlan) {
+      // 同じプランの無料体験中なら、期限を延ばす
+      tx.update(user.ref, {
+        planExpiresAt: Timestamp.fromMillis(expiresMs + days * DAY_MS),
+        trialGrantedAt: FieldValue.serverTimestamp(),
+        ...extra,
+      });
+    } else {
+      // 下のプランの無料体験中（例：ライト体験中に招待でプレミアム）なら、上のプランに切り替える
+      tx.update(user.ref, {
+        plan: trialPlan,
+        planExpiresAt: Timestamp.fromMillis(Math.max(expiresMs, now + days * DAY_MS)),
+        trialGrantedAt: FieldValue.serverTimestamp(),
+        ...extra,
+      });
+    }
+    return true;
+  }
+
+  // ストアで同じか上のプランを契約中なら、つけても意味がない
+  if (source !== "trial" && rankOf(plan) >= rankOf(trialPlan)) return false;
+
+  // 体験前のプランを覚えておき、期限が来たら戻す
+  const beforePlan = source === "trial" ? user.get("planBeforeTrial") ?? "free" : plan;
+  const beforeSource = source === "trial" ? user.get("planSourceBeforeTrial") ?? null : source ?? null;
+  tx.update(user.ref, {
+    plan: trialPlan,
+    planSource: "trial",
+    planExpiresAt: Timestamp.fromMillis(now + days * DAY_MS),
+    planBeforeTrial: beforePlan,
+    planSourceBeforeTrial: beforeSource,
+    trialGrantedAt: FieldValue.serverTimestamp(),
+    ...extra,
+  });
+  return true;
+}
+
+// 招待の特典を渡す（招待された人の年齢確認が承認済みのときだけ）
+async function processInviteReward(inviteeUid: string): Promise<boolean> {
+  const inviteRef = db.collection("invites").doc(inviteeUid);
+  return db.runTransaction(async (tx) => {
+    const invite = await tx.get(inviteRef);
+    if (!invite.exists || invite.get("status") !== "pending") return false;
+
+    const inviterUid = invite.get("inviterUid");
+    const hasInviter = typeof inviterUid === "string" && UID_RE.test(inviterUid);
+
+    // 💡 読み込みはすべて書き込みの前に行う
+    const reads = [tx.get(userRef(inviteeUid))];
+    if (hasInviter) {
+      reads.push(tx.get(userRef(inviterUid)));
+      reads.push(tx.get(db.collection("invite_owners").doc(inviterUid)));
+    }
+    const [invitee, inviter, inviterOwner] = await Promise.all(reads);
+
+    if (!invitee.exists || invitee.get("ageVerified") !== "verified") return false;
+
+    const inviteeRewarded = applyTrial(tx, invitee, "premium");
+
+    let inviterRewarded = false;
+    if (hasInviter && inviter?.exists && inviterOwner) {
+      const count = inviterOwner.get("rewardCount");
+      const used = typeof count === "number" ? count : 0;
+      if (used < INVITER_REWARD_LIMIT) {
+        inviterRewarded = applyTrial(tx, inviter, "premium");
+        if (inviterRewarded) {
+          tx.set(inviterOwner.ref, { rewardCount: used + 1 }, { merge: true });
+        }
+      }
+    }
+
+    tx.update(inviteRef, {
+      status: "rewarded",
+      rewardedAt: FieldValue.serverTimestamp(),
+      inviteeRewarded,
+      inviterRewarded,
+    });
+    return true;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 新規登録の特典：登録から1ヶ月はライトプランが無料
+// 💡 users/{uid} が初めて作られたときに1回だけ動く。お金はかからず、
+//    1ヶ月たつと expireTrials が自動でフリープランに戻す
+// ---------------------------------------------------------------------------
+const WELCOME_TRIAL_DAYS = 30;
+
+export const onUserCreated = onDocumentCreated("users/{uid}", async (event) => {
+  const uid = event.params.uid;
+  if (!UID_RE.test(uid)) return;
+  try {
+    await db.runTransaction(async (tx) => {
+      const user = await tx.get(userRef(uid));
+      if (!user.exists || user.get("welcomeTrialGranted") === true) return; // 2回目以降は何もしない
+      const flag = { welcomeTrialGranted: true };
+      const granted = applyTrial(tx, user, "light", WELCOME_TRIAL_DAYS, flag);
+      if (!granted) tx.update(user.ref, flag);
+    });
+  } catch (e) {
+    logger.error("新規登録の無料体験の付与に失敗", { uid, error: String(e) });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 招待コードを入力する
+// ---------------------------------------------------------------------------
+export const redeemInviteCode = onCall(OPTS, async (req) => {
+  const uid = authUid(req);
+  const raw = (req.data ?? {}).code;
+  const code = typeof raw === "string" ? raw.trim().toUpperCase() : "";
+  if (!INVITE_CODE_RE.test(code)) {
+    throw new HttpsError("invalid-argument", "招待コードの形式が正しくありません");
+  }
+
+  // 登録日は Firebase Authentication の記録を使う（アプリから書き換えられない）
+  const authUser = await getAuth().getUser(uid);
+  const createdMs = Date.parse(authUser.metadata.creationTime);
+  if (!Number.isFinite(createdMs) || Date.now() - createdMs > INVITE_REDEEM_WINDOW_DAYS * DAY_MS) {
+    throw new HttpsError(
+      "failed-precondition",
+      `招待コードは、登録から${INVITE_REDEEM_WINDOW_DAYS}日以内に入力してください`,
+    );
+  }
+
+  const inviteRef = db.collection("invites").doc(uid);
+  const codeRef = db.collection("invite_codes").doc(code);
+
+  await db.runTransaction(async (tx) => {
+    const [invite, codeSnap] = await tx.getAll(inviteRef, codeRef);
+    if (invite.exists) throw new HttpsError("already-exists", "招待コードはすでに入力済みです");
+    if (!codeSnap.exists) throw new HttpsError("not-found", "招待コードが見つかりません");
+
+    const inviterUid = codeSnap.get("uid");
+    if (typeof inviterUid !== "string" || !UID_RE.test(inviterUid)) {
+      throw new HttpsError("not-found", "招待コードが見つかりません");
+    }
+    if (inviterUid === uid) {
+      throw new HttpsError("invalid-argument", "自分の招待コードは使えません");
+    }
+
+    tx.create(inviteRef, {
+      inviterUid,
+      code,
+      status: "pending",
+      createdAt: FieldValue.serverTimestamp(),
+    });
+  });
+
+  // すでに年齢確認が済んでいる人は、その場で特典を渡す
+  const rewarded = await processInviteReward(uid);
+  return { status: rewarded ? "rewarded" : "pending" };
+});
+
+// ---------------------------------------------------------------------------
+// 年齢確認が承認されたら、招待の特典を渡す
+// 💡 users の更新のたびに動くが、ageVerified が verified に変わったとき以外はすぐ終わる
+// ---------------------------------------------------------------------------
+export const onUserAgeVerified = onDocumentUpdated("users/{uid}", async (event) => {
+  const before = event.data?.before.get("ageVerified");
+  const after = event.data?.after.get("ageVerified");
+  if (before === "verified" || after !== "verified") return;
+  try {
+    await processInviteReward(event.params.uid);
+  } catch (e) {
+    logger.error("招待特典の付与に失敗", { uid: event.params.uid, error: String(e) });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 無料体験の期限が過ぎた人を、体験前のプランに戻す（1時間ごと）
+// ---------------------------------------------------------------------------
+export const expireTrials = onSchedule(
+  { schedule: "every 60 minutes", timeZone: "Asia/Tokyo" },
+  async () => {
+    for (let round = 0; round < 100; round++) {
+      const snap = await db
+        .collection("users")
+        .where("planSource", "==", "trial")
+        .where("planExpiresAt", "<=", Timestamp.now())
+        .limit(400)
+        .get();
+      if (snap.empty) break;
+
+      const batch = db.batch();
+      for (const doc of snap.docs) {
+        const beforePlan = doc.get("planBeforeTrial");
+        const beforeSource = doc.get("planSourceBeforeTrial");
+        batch.update(doc.ref, {
+          plan: typeof beforePlan === "string" ? beforePlan : "free",
+          planSource: typeof beforeSource === "string" ? beforeSource : FieldValue.delete(),
+          planExpiresAt: FieldValue.delete(),
+          planBeforeTrial: FieldValue.delete(),
+          planSourceBeforeTrial: FieldValue.delete(),
+        });
+      }
+      await batch.commit();
+      logger.info("無料体験の期限切れを戻しました", { count: snap.size });
+      if (snap.size < 400) break;
+    }
+  },
+);

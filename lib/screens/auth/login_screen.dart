@@ -2,9 +2,10 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:crypto/crypto.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_sign_in/google_sign_in.dart';
@@ -95,40 +96,72 @@ class _LoginScreenState extends State<LoginScreen> {
     return false;
   }
 
-  // 💡 招待コードは英数字のみ・上限10文字に正規化してからFirestoreへ保存する
+  // 💡 招待コードは英数字のみ・8文字（サーバーが発行するコードの長さ）に整える
+  static const int _inviteCodeLength = 8;
+
   String? _sanitizedInvitationCode() {
     final raw = _invitationCodeController.text.trim();
     if (raw.isEmpty) return null;
     final sanitized = raw.toUpperCase().replaceAll(RegExp(r'[^A-Z0-9]'), '');
     if (sanitized.isEmpty) return null;
-    return sanitized.length > 10 ? sanitized.substring(0, 10) : sanitized;
+    return sanitized.length > _inviteCodeLength
+        ? sanitized.substring(0, _inviteCodeLength)
+        : sanitized;
+  }
+
+  // 💡 招待コードはサーバー（redeemInviteCode）に送って登録する。
+  //    コードが間違っていても、アカウント登録自体は止めない
+  //    （ホームの招待バナーの「詳細」から、登録後7日以内ならもう一度入力できる）
+  Future<void> _redeemInvitationCode(String? code) async {
+    if (code == null) return;
+    try {
+      await FirebaseFunctions.instanceFor(region: 'asia-northeast1')
+          .httpsCallable(
+            'redeemInviteCode',
+            options: HttpsCallableOptions(timeout: _authTimeout),
+          )
+          .call({'code': code});
+    } on FirebaseFunctionsException catch (e) {
+      debugPrint('招待コード登録エラー: ${e.code} ${e.message}');
+      if (e.code == 'already-exists') return;
+      _showMessage(
+        '${e.message ?? '招待コードを登録できませんでした'}。'
+        'ホームの招待バナーの「詳細」から、もう一度入力できます。',
+      );
+    } catch (e) {
+      debugPrint('招待コード登録エラー: $e');
+      _showMessage('招待コードを登録できませんでした。ホームの招待バナーの「詳細」から、もう一度入力できます。');
+    }
   }
 
   // ==========================================
   // ユーザー情報（Firestore）の作成
   // ==========================================
   //    メール登録・Google/Apple登録・「登録途中で失敗した人の修復」で共通して使う
+  //
+  // 💡 users/{uid} はログインしている人なら誰でも読める（プロフィールを見せるため）。
+  //    そのためメールアドレスなどの個人情報は、本人だけが読める
+  //    users/{uid}/private/account に分けて保存する。
+  //    招待コードはサーバー（redeemInviteCode）で登録し、ここには書かない。
+  //    （以前の「ユーザーIDの先頭8文字を招待コードにする」方式は、IDの一部が漏れるため廃止）
   Future<void> _createUserDoc({
     required String uid,
     required String email,
     required bool agreed,
-    String? invitationCode,
   }) async {
-    await FirebaseFirestore.instance
-        .collection('users')
-        .doc(uid)
-        .set({
-          'email': email,
-          'createdAt': FieldValue.serverTimestamp(),
-          'usedInvitationCode': invitationCode,
-          'friends': [],
-          // 💡 6文字だと5万人規模で他の人と同じコードになる確率が高いため、8文字にする
-          'myInvitationCode': uid.substring(0, 8).toUpperCase(),
-          'isProfileCompleted': false,
-          // 💡 いつ利用規約に同意したかを記録しておく（トラブル時の証拠になる）
-          if (agreed) 'agreedToTermsAt': FieldValue.serverTimestamp(),
-        })
-        .timeout(_authTimeout);
+    final db = FirebaseFirestore.instance;
+    final userRef = db.collection('users').doc(uid);
+    final batch = db.batch();
+    batch.set(userRef, {
+      'createdAt': FieldValue.serverTimestamp(),
+      'isProfileCompleted': false,
+    });
+    batch.set(userRef.collection('private').doc('account'), {
+      'email': email,
+      // 💡 いつ利用規約に同意したかを記録しておく（トラブル時の証拠になる）
+      if (agreed) 'agreedToTermsAt': FieldValue.serverTimestamp(),
+    });
+    await batch.commit().timeout(_authTimeout);
   }
 
   // ==========================================
@@ -170,12 +203,8 @@ class _LoginScreenState extends State<LoginScreen> {
         final User? user = credential.user;
         if (user == null) throw Exception('ユーザー作成に失敗しました');
 
-        await _createUserDoc(
-          uid: user.uid,
-          email: email,
-          agreed: true,
-          invitationCode: invitationCode,
-        );
+        await _createUserDoc(uid: user.uid, email: email, agreed: true);
+        await _redeemInvitationCode(invitationCode);
 
         // 💡 確認メールの送信に失敗しても、次の画面から再送できるので登録自体は続行する
         try {
@@ -517,7 +546,6 @@ class _LoginScreenState extends State<LoginScreen> {
           uid: user.uid,
           email: user.email ?? '',
           agreed: true,
-          invitationCode: invitationCode,
         );
       } catch (e) {
         // 💡 ユーザー情報の保存に失敗したら、ログインした状態のまま放置せずに
@@ -529,6 +557,7 @@ class _LoginScreenState extends State<LoginScreen> {
         rethrow;
       }
       _showMessage('アカウントを作成しました。');
+      await _redeemInvitationCode(invitationCode);
     }
 
     // 💡 Google・Appleのアカウントはメール確認済みとして扱われるので、そのままホームへ
@@ -573,6 +602,12 @@ class _LoginScreenState extends State<LoginScreen> {
                     mainAxisAlignment: MainAxisAlignment.center,
                     crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
+                      // 💡 新規登録のときは、招待コードと同意を一番上に置く。
+                      //    メール・Google・Apple のどの方法で登録しても使われる
+                      if (!_isLoginMode) ...[
+                        _buildSignupCommonSection(),
+                        const SizedBox(height: 24),
+                      ],
                       TextField(
                         controller: _emailController,
                         decoration: const InputDecoration(
@@ -619,30 +654,6 @@ class _LoginScreenState extends State<LoginScreen> {
                           if (!isAuthDisabled) _authAction();
                         },
                       ),
-
-                      if (!_isLoginMode) ...[
-                        const SizedBox(height: 16),
-                        TextField(
-                          controller: _invitationCodeController,
-                          decoration: const InputDecoration(
-                            labelText: '友達の招待コード（お持ちの方）',
-                            hintText: '例: AB12CD34',
-                            border: OutlineInputBorder(),
-                            prefixIcon: Icon(
-                              Icons.card_giftcard,
-                              color: Colors.orange,
-                            ),
-                          ),
-                          textCapitalization: TextCapitalization.characters,
-                          maxLength: 10,
-                          inputFormatters: [
-                            FilteringTextInputFormatter.allow(
-                              RegExp(r'[A-Za-z0-9]'),
-                            ),
-                          ],
-                        ),
-                        _buildAgreementCheckbox(),
-                      ],
 
                       const SizedBox(height: 24),
 
@@ -779,6 +790,50 @@ class _LoginScreenState extends State<LoginScreen> {
             );
           },
         ),
+      ),
+    );
+  }
+
+  // 💡 新規登録で共通の欄（招待コード・同意）。どの登録方法でも使われる
+  Widget _buildSignupCommonSection() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+      decoration: BoxDecoration(
+        color: Colors.grey[50],
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.grey[200]!),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          TextField(
+            controller: _invitationCodeController,
+            decoration: const InputDecoration(
+              labelText: '友達の招待コード（お持ちの方）',
+              hintText: '例: AB12CD34',
+              border: OutlineInputBorder(),
+              filled: true,
+              fillColor: Colors.white,
+              prefixIcon: Icon(Icons.card_giftcard, color: Colors.orange),
+            ),
+            textCapitalization: TextCapitalization.characters,
+            maxLength: _inviteCodeLength,
+            inputFormatters: [
+              FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z0-9]')),
+            ],
+          ),
+          Text(
+            'メール・Google・Apple のどの方法で登録しても使えます。'
+            'あとから入力する場合は、登録後7日以内にホームの招待バナーの「詳細」から入力できます。',
+            style: TextStyle(
+              fontSize: 11,
+              color: Colors.grey[600],
+              height: 1.5,
+            ),
+          ),
+          _buildAgreementCheckbox(),
+        ],
       ),
     );
   }

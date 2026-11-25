@@ -135,7 +135,16 @@ class _MypageScreenState extends State<MypageScreen> {
               ? rawBadge as String
               : '';
           final rawPlan = data['plan'];
-          _plan = rawPlan is String ? rawPlan : 'free';
+          // 💡 友達招待の無料体験中は、ストアでの解約が不要なので「フリー」扱いにする
+          //    （ただし、体験前にストアで契約していたプランがあれば、そちらで判定する）
+          if (data['planSource'] == 'trial') {
+            final before = data['planBeforeTrial'];
+            _plan = data['planSourceBeforeTrial'] == 'store' && before is String
+                ? before
+                : 'free';
+          } else {
+            _plan = rawPlan is String ? rawPlan : 'free';
+          }
           final String fullId = _uid!;
           final String shortId = fullId.length >= 8
               ? fullId.substring(0, 8)
