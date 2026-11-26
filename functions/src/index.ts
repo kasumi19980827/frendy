@@ -14,7 +14,11 @@ import {
 } from "firebase-admin/firestore";
 import { getStorage } from "firebase-admin/storage";
 import { logger, setGlobalOptions } from "firebase-functions/v2";
-import { onDocumentCreated, onDocumentUpdated } from "firebase-functions/v2/firestore";
+import {
+  onDocumentCreated,
+  onDocumentUpdated,
+  onDocumentWritten,
+} from "firebase-functions/v2/firestore";
 import { CallableRequest, HttpsError, onCall } from "firebase-functions/v2/https";
 import { onSchedule } from "firebase-functions/v2/scheduler";
 
@@ -227,6 +231,95 @@ function badgeFor(count: number): "silver" | "gold" | null {
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// 友達作り専用のための見張り（モデレーション）
+//
+//  ・はっきりした恋愛・出会い目的の言葉は firestore.rules で投稿自体を止めている
+//  ・ここでは「すき間をあけて書く」などのすり抜けや、グレーな言葉を見つけて
+//    moderation_flags に記録する（運営が Firebase コンソールで確認して対応する）
+//  ※ 言葉のリストは lib/constants/ng_words.dart、firestore.rules と合わせること
+// ---------------------------------------------------------------------------
+const NG_STRONG = [
+  "恋人募集", "恋人探し", "恋人候補", "恋人ほしい", "恋人欲しい",
+  "彼氏募集", "彼女募集", "彼氏探し", "彼女探し", "彼氏候補", "彼女候補",
+  "交際希望", "真剣交際", "交際相手募集", "結婚相手募集", "婚活", "恋活",
+  "出会い目的", "出会い系", "セフレ", "ワンナイト",
+  "パパ活", "ママ活", "援助交際", "援交", "大人の関係", "体の関係", "身体の関係", "ホ別",
+];
+// プロフィールにあったら「確認だけ」する言葉（自動では止めない）
+const NG_SOFT = [
+  "恋愛", "恋人", "彼氏", "彼女", "付き合", "デート", "交際", "結婚", "割り切り", "ホテル",
+];
+const PROFILE_TEXT_FIELDS = [
+  "name", "hobby", "recentInterest", "idealFriend", "holidayActivity",
+  "ngThings", "school", "work", "location",
+];
+
+// 判定用に文字をそろえる：全角英数→半角、カタカナ→ひらがな、空白・記号を除去、小文字化
+function normalizeForCheck(text: string): string {
+  return text
+    .normalize("NFKC")
+    .replace(/[ァ-ヶ]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0x60))
+    .replace(/[\s　・･.,、。!！?？~〜ー\-_*＊/／|｜"'`()（）「」『』【】\[\]]/g, "")
+    .toLowerCase();
+}
+const toHira = (w: string) => normalizeForCheck(w);
+const NG_STRONG_N = NG_STRONG.map(toHira);
+const NG_SOFT_N = NG_SOFT.map(toHira);
+
+function findWords(text: string, words: string[], originals: string[]): string[] {
+  const n = normalizeForCheck(text);
+  return originals.filter((_, i) => n.includes(words[i]));
+}
+
+// 同じ対象は1件にまとめる（ドキュメントID固定で上書き）＝件数が膨らまない
+async function writeFlag(
+  id: string,
+  data: Record<string, unknown>,
+): Promise<void> {
+  await db.collection("moderation_flags").doc(id).set(
+    { ...data, status: "open", updatedAt: FieldValue.serverTimestamp() },
+    { merge: true },
+  );
+}
+
+// プロフィールが作成・更新されたら、文章の項目とタグを確認する
+export const onUserProfileModeration = onDocumentWritten("users/{uid}", async (event) => {
+  const after = event.data?.after;
+  if (!after?.exists) return; // 退会
+  const before = event.data?.before;
+
+  // 💡 変わった項目だけ確認する（ログイン時刻の更新などでは何もしない）
+  const hits: Record<string, { strong: string[]; soft: string[]; text: string }> = {};
+  const fields = [...PROFILE_TEXT_FIELDS, "tags"];
+  for (const f of fields) {
+    const raw = after.get(f);
+    const prev = before?.exists ? before.get(f) : undefined;
+    if (JSON.stringify(raw) === JSON.stringify(prev)) continue;
+    const text = Array.isArray(raw)
+      ? raw.filter((t) => typeof t === "string").join(" ")
+      : typeof raw === "string" ? raw : "";
+    if (!text) continue;
+    const strong = findWords(text, NG_STRONG_N, NG_STRONG);
+    const soft = findWords(text, NG_SOFT_N, NG_SOFT);
+    if (strong.length || soft.length) hits[f] = { strong, soft, text: text.slice(0, 300) };
+  }
+  if (Object.keys(hits).length === 0) return;
+
+  const hasStrong = Object.values(hits).some((h) => h.strong.length > 0);
+  try {
+    await writeFlag(`profile_${event.params.uid}`, {
+      type: "profile",
+      userId: event.params.uid,
+      level: hasStrong ? "high" : "check",
+      hits,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+  } catch (e) {
+    logger.error("profile moderation flag failed", { uid: event.params.uid, e });
+  }
+});
+
 export const onMessageCreated = onDocumentCreated(
   "chat_rooms/{roomId}/messages/{messageId}",
   async (event) => {
@@ -241,6 +334,28 @@ export const onMessageCreated = onDocumentCreated(
     const peerId = members[0] === senderId ? members[1] : members[0];
 
     const rawText = msg.get("text");
+
+    // --- 友達作り専用：すり抜けた恋愛・出会い目的の言葉を見つけたら運営に知らせる ---
+    if (typeof rawText === "string") {
+      const strong = findWords(rawText, NG_STRONG_N, NG_STRONG);
+      if (strong.length > 0) {
+        try {
+          await writeFlag(`message_${event.params.roomId}_${event.params.messageId}`, {
+            type: "message",
+            userId: senderId,
+            roomId: event.params.roomId,
+            messageId: event.params.messageId,
+            level: "high",
+            words: strong,
+            text: rawText.slice(0, 300),
+            createdAt: FieldValue.serverTimestamp(),
+          });
+        } catch (e) {
+          logger.error("message moderation flag failed", { e });
+        }
+      }
+    }
+
     const preview =
       typeof rawText === "string" ? rawText.slice(0, LAST_MESSAGE_PREVIEW_LENGTH) : "";
     const createdAt = msg.get("createdAt");
@@ -586,6 +701,13 @@ export const startTalk = onCall(OPTS, async (req) => {
     );
 
     if (!peer.exists || myBlock.exists || peerBlock.exists) {
+      throw new HttpsError("failed-precondition", "このユーザーとはやり取りできません");
+    }
+    // 利用停止中のユーザー（自分・相手とも）とは新しくトークを始められない
+    if (me.get("isBanned") === true) {
+      throw new HttpsError("permission-denied", "現在、アカウントの利用が制限されています");
+    }
+    if (peer.get("isBanned") === true) {
       throw new HttpsError("failed-precondition", "このユーザーとはやり取りできません");
     }
     if (isNameMissing(me)) {

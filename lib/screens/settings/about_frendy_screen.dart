@@ -65,6 +65,11 @@ const List<_Item> _features = [
 
 const List<_Item> _safety = [
   _Item(
+    Icons.diversity_3_outlined,
+    '友達作り専用のアプリです',
+    'Frendyは友達作りのためのアプリです。恋人募集・交際希望・婚活などの恋愛目的の投稿や、出会い目的・パパ活などの勧誘は禁止しています。見つけた場合は削除・利用停止の対象になります。',
+  ),
+  _Item(
     Icons.verified_user_outlined,
     '年齢確認・本人確認',
     '安心して使っていただくため、年齢確認・本人確認を行っています。確認が済んだ方だけがトークを利用できます。提出いただいた身分証は運営だけが確認し、他のユーザーに公開されることはありません。',
@@ -197,8 +202,9 @@ class AboutFrendyScreen extends StatelessWidget {
           ),
           SizedBox(height: 8),
           Text(
-            'Frendyは、気の合う新しい友達と出会えるアプリです。'
-            'メッセージで少しずつ仲良くなって、友達になりましょう。',
+            'Frendyは、趣味や価値観の合う「友達」を作るためのアプリです。'
+            '同じ趣味の仲間や、気軽に話せる友達を見つけて、メッセージで少しずつ仲良くなりましょう。\n'
+            '※恋人・交際相手探しを目的としたサービスではありません。',
             style: TextStyle(color: Colors.white, fontSize: 14, height: 1.6),
           ),
         ],

@@ -15,6 +15,7 @@ import 'package:matching_app/screens/profile/profile_setup_screen.dart';
 import 'package:matching_app/screens/settings/about_frendy_screen.dart';
 import 'package:matching_app/screens/settings/app_settings_screen.dart';
 import 'package:matching_app/screens/settings/help_support_screen.dart';
+import 'package:matching_app/screens/settings/personal_messages_screen.dart';
 import 'package:matching_app/screens/settings/privacy_policy_screen.dart';
 import 'package:matching_app/screens/settings/terms_of_service_screen.dart';
 import 'package:matching_app/screens/subscription/subscription_screen.dart';
@@ -49,6 +50,9 @@ class _MypageScreenState extends State<MypageScreen> {
   Stream<DocumentSnapshot<Map<String, dynamic>>>? _myStream;
 
   bool _busy = false; // ログアウト・退会の多重実行防止
+
+  // 💡 運営からの個別メッセージの未読数（「アプリ設定」の項目にバッジを出す）
+  late final Stream<int> _unreadStream = personalMessagesUnreadCount();
 
   // 退会時の案内に使う（有料プランの人には、先に解約を案内する）
   String _plan = 'free';
@@ -286,10 +290,14 @@ class _MypageScreenState extends State<MypageScreen> {
                 label: '年齢確認・本人確認',
                 onTap: () => _push(const IdentityVerificationScreen()),
               ),
-              _buildSettingsItem(
-                icon: Icons.settings,
-                label: 'アプリ設定',
-                onTap: () => _push(const AppSettingsScreen()),
+              StreamBuilder<int>(
+                stream: _unreadStream,
+                builder: (context, snapshot) => _buildSettingsItem(
+                  icon: Icons.settings,
+                  label: 'アプリ設定',
+                  unreadCount: snapshot.data ?? 0,
+                  onTap: () => _push(const AppSettingsScreen()),
+                ),
               ),
               _buildSettingsItem(
                 icon: Icons.info_outline,
@@ -338,6 +346,7 @@ class _MypageScreenState extends State<MypageScreen> {
     required IconData icon,
     required String label,
     required VoidCallback onTap,
+    int unreadCount = 0,
     Color labelColor = Colors.black87,
   }) {
     return ListTile(
@@ -346,7 +355,29 @@ class _MypageScreenState extends State<MypageScreen> {
       contentPadding: const EdgeInsets.symmetric(horizontal: 16),
       leading: Icon(icon, color: Colors.grey[600]),
       title: Text(label, style: TextStyle(color: labelColor, fontSize: 16)),
-      trailing: const Icon(Icons.chevron_right, color: Colors.grey),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // 未読の運営メッセージがあるときだけ、赤い数字を出す
+          if (unreadCount > 0)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+              decoration: BoxDecoration(
+                color: Colors.red,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Text(
+                unreadCount >= 20 ? '20+' : '$unreadCount',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 11,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          const Icon(Icons.chevron_right, color: Colors.grey),
+        ],
+      ),
       onTap: _busy ? null : onTap,
     );
   }

@@ -996,10 +996,22 @@ class _ReportDialog extends StatefulWidget {
   State<_ReportDialog> createState() => _ReportDialogState();
 }
 
+// 通報の種類（firestore.rules の reportCategories() と同じにすること）
+const List<(String, String)> _kReportCategories = [
+  ('romance', '恋愛・交際目的の募集'),
+  ('sexual', '出会い目的・性的な誘い'),
+  ('money', 'パパ活・金銭の要求・勧誘'),
+  ('harassment', '嫌がらせ・誹謗中傷'),
+  ('fake', 'なりすまし・虚偽のプロフィール'),
+  ('minor', '18歳未満の疑い'),
+  ('other', 'その他'),
+];
+
 class _ReportDialogState extends State<_ReportDialog> {
   final TextEditingController _controller = TextEditingController();
   bool _submitting = false;
   String? _error;
+  String? _category; // 選んだ通報の種類
 
   @override
   void dispose() {
@@ -1008,8 +1020,15 @@ class _ReportDialogState extends State<_ReportDialog> {
   }
 
   Future<void> _submit() async {
-    final reason = _controller.text.trim();
-    if (reason.isEmpty || _submitting) return;
+    if (_category == null || _submitting) return;
+    final detail = _controller.text.trim();
+    // 「その他」は詳しい内容を必須にする
+    if (_category == 'other' && detail.isEmpty) {
+      setState(() => _error = '「その他」の場合は内容を入力してください。');
+      return;
+    }
+    final label = _kReportCategories.firstWhere((c) => c.$1 == _category).$2;
+    final reason = detail.isEmpty ? label : '$label：$detail';
 
     setState(() {
       _submitting = true;
@@ -1024,6 +1043,7 @@ class _ReportDialogState extends State<_ReportDialog> {
             'reporterId': widget.reporterId,
             'reportedId': widget.peerId,
             'reason': reason,
+            'category': _category,
             'createdAt': FieldValue.serverTimestamp(),
           })
           .timeout(_kNetworkTimeout);
@@ -1058,47 +1078,76 @@ class _ReportDialogState extends State<_ReportDialog> {
         textAlign: TextAlign.center,
         style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
       ),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Text(
-            '不適切な言動や規約違反がありましたか？\n理由を詳しく教えてください。',
-            style: TextStyle(fontSize: 12, color: Colors.grey, height: 1.5),
-            textAlign: TextAlign.center,
-          ),
-          const SizedBox(height: 20),
-          TextField(
-            controller: _controller,
-            enabled: !_submitting,
-            maxLines: 4,
-            maxLength: 500,
-            style: const TextStyle(fontSize: 14),
-            decoration: InputDecoration(
-              hintText: '通報理由を入力...',
-              filled: true,
-              fillColor: Colors.grey[50],
-              contentPadding: const EdgeInsets.all(16),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(16),
-                borderSide: BorderSide(color: Colors.grey[200]!),
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(16),
-                borderSide: const BorderSide(
-                  color: Colors.redAccent,
-                  width: 1.5,
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              '通報の理由を選んでください。\n通報したことが相手に知られることはありません。',
+              style: TextStyle(fontSize: 12, color: Colors.grey, height: 1.5),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 16),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              alignment: WrapAlignment.center,
+              children: [
+                for (final c in _kReportCategories)
+                  ChoiceChip(
+                    label: Text(c.$2, style: const TextStyle(fontSize: 12)),
+                    selected: _category == c.$1,
+                    selectedColor: Colors.redAccent.withValues(alpha: 0.15),
+                    backgroundColor: Colors.grey[100],
+                    side: BorderSide(
+                      color: _category == c.$1
+                          ? Colors.redAccent
+                          : Colors.grey[300]!,
+                    ),
+                    showCheckmark: false,
+                    onSelected: _submitting
+                        ? null
+                        : (_) => setState(() {
+                            _category = c.$1;
+                            _error = null;
+                          }),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: _controller,
+              enabled: !_submitting,
+              maxLines: 4,
+              maxLength: 500,
+              style: const TextStyle(fontSize: 14),
+              decoration: InputDecoration(
+                hintText: '詳しい内容（任意。「その他」は必須）',
+                filled: true,
+                fillColor: Colors.grey[50],
+                contentPadding: const EdgeInsets.all(16),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(16),
+                  borderSide: BorderSide(color: Colors.grey[200]!),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(16),
+                  borderSide: const BorderSide(
+                    color: Colors.redAccent,
+                    width: 1.5,
+                  ),
                 ),
               ),
             ),
-          ),
-          if (_error != null) ...[
-            const SizedBox(height: 8),
-            Text(
-              _error!,
-              style: const TextStyle(color: Colors.redAccent, fontSize: 12),
-            ),
+            if (_error != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                _error!,
+                style: const TextStyle(color: Colors.redAccent, fontSize: 12),
+              ),
+            ],
           ],
-        ],
+        ),
       ),
       actionsPadding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
       actions: [
@@ -1121,7 +1170,7 @@ class _ReportDialogState extends State<_ReportDialog> {
             const SizedBox(width: 12),
             Expanded(
               child: ElevatedButton(
-                onPressed: _submitting ? null : _submit,
+                onPressed: (_submitting || _category == null) ? null : _submit,
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.redAccent,
                   foregroundColor: Colors.white,
@@ -1196,7 +1245,7 @@ class _ActionTile extends StatelessWidget {
                     Text(
                       title,
                       style: const TextStyle(fontWeight: FontWeight.bold),
-                    ), 
+                    ),
                     Text(
                       subtitle,
                       style: TextStyle(fontSize: 12, color: Colors.grey[600]),
@@ -1209,6 +1258,160 @@ class _ActionTile extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+// ============================================================================
+// 下のタブ「トーク」アイコン用の未読バッジ
+//
+// ・新しいメッセージが届くと、トークのアイコンの右上に赤い数字（未読の合計）が出る
+// ・トークを開いて既読にすると（unreadCount が 0 になると）自動で消える
+//
+// 💡 5万人対策：トーク一覧の最初の読み込みと「まったく同じ条件」で読むので、
+//    Firestore のアプリ内部で1本の接続にまとめられ、読み取り回数がほぼ増えない。
+//    数えるのは新しい順に30件のトークまで（それより古いトークに未読が残る
+//    ことはほぼないため）。
+// 💡 トーク一覧は年齢確認済みの人しか読めないので、確認前は何も表示しない。
+// ============================================================================
+class TalkUnreadBadge extends StatefulWidget {
+  const TalkUnreadBadge({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  State<TalkUnreadBadge> createState() => _TalkUnreadBadgeState();
+}
+
+class _TalkUnreadBadgeState extends State<TalkUnreadBadge> {
+  late final String _myId = FirebaseAuth.instance.currentUser?.uid ?? '';
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _mySub;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _roomSub;
+  int _unread = 0;
+
+  // 相手のアカウントが存在するか（true=いる / false=退会・削除済み）
+  final Map<String, bool> _peerExists = {};
+  // 最新のトーク一覧（相手の確認が終わったら数え直すために持っておく）
+  List<_Room> _rooms = [];
+
+  @override
+  void initState() {
+    super.initState();
+    if (_myId.isEmpty) return;
+
+    // 年齢確認の状態を見て、承認済みになったらトークの購読を始める
+    _mySub = _db.collection('users').doc(_myId).snapshots().listen((snap) {
+      final verified = snap.data()?['ageVerified'] == 'verified';
+      if (verified && _roomSub == null) {
+        _listenRooms();
+      } else if (!verified && _roomSub != null) {
+        _roomSub?.cancel();
+        _roomSub = null;
+        if (mounted) setState(() => _unread = 0);
+      }
+    }, onError: (Object e) => debugPrint('未読バッジ（プロフィール）エラー: $e'));
+  }
+
+  void _listenRooms() {
+    _roomSub = _db
+        .collection('chat_rooms')
+        .where('users', arrayContains: _myId)
+        .where('lastMessageTime', isNull: false)
+        .orderBy('lastMessageTime', descending: true)
+        .limit(_kRoomPageSize)
+        .snapshots()
+        .listen(
+          (snap) {
+            _rooms = snap.docs
+                .map((d) => _Room.fromDoc(d, _myId))
+                .whereType<_Room>()
+                .toList();
+            _recount();
+            _checkPeers();
+          },
+          onError: (Object e) {
+            debugPrint('未読バッジ（トーク）エラー: $e');
+            _roomSub = null; // 次にプロフィールが更新されたときに再挑戦する
+          },
+        );
+  }
+
+  // トーク一覧の画面に「表示されるトーク」と同じ条件で、未読を合計する
+  void _recount() {
+    var total = 0;
+    for (final room in _rooms) {
+      if (room.unreadCount <= 0) continue;
+      if (room.isBlocked) continue; // ブロック中は数えない
+      // 非表示にした後に新着がないトークは数えない
+      final hiddenAt = room.hiddenAt;
+      if (hiddenAt != null &&
+          (room.lastTime == null || room.lastTime!.compareTo(hiddenAt) <= 0)) {
+        continue;
+      }
+      // 💡 相手が退会・削除済み（一覧に出てこないトーク）は数えない
+      //    確認がまだの相手も、確認が終わるまで数えない（間違った数を出さない）
+      if (_peerExists[room.peerId] != true) continue;
+      total += room.unreadCount;
+    }
+    if (mounted && total != _unread) setState(() => _unread = total);
+  }
+
+  // 未読があるトークの相手が、まだ存在するかをまとめて確認する（1回だけ）
+  Future<void> _checkPeers() async {
+    final unknown = _rooms
+        .where((r) => r.unreadCount > 0 && !_peerExists.containsKey(r.peerId))
+        .map((r) => r.peerId)
+        .toSet()
+        .toList();
+    if (unknown.isEmpty) return;
+
+    try {
+      // 30件までなので1回の問い合わせで済む
+      final snap = await _db
+          .collection('users')
+          .where(
+            FieldPath.documentId,
+            whereIn: unknown.take(_kWhereInLimit).toList(),
+          )
+          .get()
+          .timeout(_kNetworkTimeout);
+      final found = snap.docs.map((d) => d.id).toSet();
+      for (final id in unknown.take(_kWhereInLimit)) {
+        _peerExists[id] = found.contains(id);
+      }
+    } catch (e) {
+      debugPrint('未読バッジ（相手の確認）エラー: $e');
+      return;
+    }
+
+    // 🧹 相手がもういないトークに残っている未読は、0に戻して片付ける
+    for (final room in _rooms) {
+      if (room.unreadCount > 0 && _peerExists[room.peerId] == false) {
+        debugPrint('未読バッジ：相手がいないトーク ${room.id} の未読を0にします');
+        _db
+            .collection('chat_rooms')
+            .doc(room.id)
+            .update({'unreadCount.$_myId': 0})
+            .catchError((Object e) => debugPrint('未読の片付けエラー: $e'));
+      }
+    }
+    _recount();
+  }
+
+  @override
+  void dispose() {
+    _mySub?.cancel();
+    _roomSub?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Badge(
+      isLabelVisible: _unread > 0,
+      backgroundColor: Colors.red,
+      label: Text(_unread > 99 ? '99+' : '$_unread'),
+      child: widget.child,
     );
   }
 }

@@ -11,6 +11,7 @@ import 'package:matching_app/screens/friends/friends_screen.dart';
 import 'package:matching_app/screens/home/home_screen.dart';
 import 'package:matching_app/screens/mypage/mypage_screen.dart';
 import 'package:matching_app/screens/search/search_screen.dart';
+import 'package:matching_app/screens/settings/personal_messages_screen.dart';
 import 'package:matching_app/screens/talk/message_screen.dart';
 
 import 'firebase_options.dart';
@@ -146,16 +147,52 @@ class _MyHomePageState extends State<MyHomePage> {
         selectedItemColor: AppColors.point,
         unselectedItemColor: AppColors.txt,
         items: const [
-          BottomNavigationBarItem(icon: Icon(Icons.home), label: 'ホーム'),
-          BottomNavigationBarItem(icon: Icon(Icons.search), label: '探す'),
-          BottomNavigationBarItem(icon: Icon(Icons.forum), label: 'トーク'),
-          BottomNavigationBarItem(icon: Icon(Icons.people), label: '友達'),
+          BottomNavigationBarItem(icon: _NavIcon(Icons.home), label: 'ホーム'),
+          BottomNavigationBarItem(icon: _NavIcon(Icons.search), label: '探す'),
+          // 💡 新しいメッセージ（未読）があると、アイコンの右上に赤い数字が出る
           BottomNavigationBarItem(
-            icon: Icon(Icons.account_circle),
+            icon: _NavIcon(Icons.forum, badge: _NavBadge.talk),
+            label: 'トーク',
+          ),
+          BottomNavigationBarItem(icon: _NavIcon(Icons.people), label: '友達'),
+          // 💡 運営からの個別メッセージに未読があると、アイコンの右上に赤い数字が出る
+          BottomNavigationBarItem(
+            icon: _NavIcon(Icons.account_circle, badge: _NavBadge.personal),
             label: 'プロフ',
           ),
         ],
       ),
+    );
+  }
+}
+
+// ----------------------------------------------------------------------------
+// 下のタブのアイコン
+// 💡 アイコンを少し下げて、タブの真ん中あたりに見えるようにする
+//    （下げる量は _kNavIconTopPadding の数字で調整できます）
+// ----------------------------------------------------------------------------
+const double _kNavIconTopPadding = 6;
+
+enum _NavBadge { none, talk, personal }
+
+class _NavIcon extends StatelessWidget {
+  const _NavIcon(this.icon, {this.badge = _NavBadge.none});
+
+  final IconData icon;
+  final _NavBadge badge;
+
+  @override
+  Widget build(BuildContext context) {
+    // 赤い数字はアイコンにくっつけたまま、アイコンごと下げる
+    final Widget iconWidget = Icon(icon);
+    final Widget withBadge = switch (badge) {
+      _NavBadge.talk => TalkUnreadBadge(child: iconWidget),
+      _NavBadge.personal => PersonalMessagesBadge(child: iconWidget),
+      _NavBadge.none => iconWidget,
+    };
+    return Padding(
+      padding: const EdgeInsets.only(top: _kNavIconTopPadding),
+      child: withBadge,
     );
   }
 }

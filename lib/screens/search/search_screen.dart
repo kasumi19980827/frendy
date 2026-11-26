@@ -22,6 +22,12 @@ import 'package:matching_app/screens/profile/profile_detail_screen.dart';
 //  ・年齢・キーワード・2つ目以降のタグは、読み込んだ分の中で絞り込む
 //  ・ID検索（プロフィールに表示される英数字のID）はサーバー側で前方一致検索
 //  ・ブロック関係（自分がブロック・相手からブロック）は一覧から除外
+//
+// 💡 プレミアムプランの優先表示
+//  ・「ユーザー」タブ：最初に、プレミアムの人を最終ログインが新しい順に最大30人読み込み、
+//    検索条件に合う人を一番上に並べる。その下に、ほかの人を最終ログイン順に並べる
+//  ・「おすすめ」タブ：趣味が合う人の中で、プレミアムの人を先に並べる
+//  ・友達招待の無料体験で期限が切れた人は、プレミアムとして扱わない
 // ============================================================================
 
 const Duration _kNetworkTimeout = Duration(seconds: 20);
@@ -30,6 +36,7 @@ const int _kMinResultsPerLoad = 12; // 1回の「続きを読む」で最低こ�
 const int _kMaxScanPerLoad = 150; // 絞り込みで外れが多くても、1回で読むのはここまで
 const int _kRecommendPool = 150; // おすすめを計算する対象（最近ログインした人から）
 const int _kMaxRelations = 1000; // ブロック一覧を読む上限
+const int _kPremiumPool = 30; // 一番上に並べるプレミアムの人を、最大何人読み込むか
 const Duration _kLastLoginUpdateInterval = Duration(hours: 6);
 
 final RegExp _kIdPattern = RegExp(r'^[A-Za-z0-9]{6,28}$');
@@ -355,7 +362,15 @@ class _SearchScreenState extends State<SearchScreen> {
     return true;
   }
 
-  int _planPriority(Map<String, dynamic> d) => d['plan'] == 'premium' ? 1 : 0;
+  // 💡 今プレミアムとして扱うか（無料体験の期限が切れていれば扱わない）
+  bool _isPremium(Map<String, dynamic> d) {
+    if (d['plan'] != 'premium') return false;
+    if (d['planSource'] != 'trial') return true;
+    final expires = d['planExpiresAt'];
+    return expires is Timestamp && expires.toDate().isAfter(DateTime.now());
+  }
+
+  int _planPriority(Map<String, dynamic> d) => _isPremium(d) ? 1 : 0;
 
   int _hobbyScore(Map<String, dynamic> d) {
     if (_myHobbyWords.isEmpty) return 0;
@@ -460,6 +475,34 @@ class _SearchScreenState extends State<SearchScreen> {
     }
   }
 
+  // 💡 プレミアムの人を、最終ログインが新しい順に読み込む（一番上に並べる用）
+  //    性別・タグも、ここでは読み込んだ分の中で絞り込む（インデックスを増やさないため）
+  Future<List<_Candidate>> _fetchPremium(int req) async {
+    try {
+      final snap = await _db
+          .collection('users')
+          .where('plan', isEqualTo: 'premium')
+          .orderBy('lastLoginTime', descending: true)
+          .limit(_kPremiumPool)
+          .get()
+          .timeout(_kNetworkTimeout);
+      if (req != _requestId) return const [];
+      final result = [
+        for (final doc in snap.docs)
+          if (_isPremium(doc.data()) &&
+              _isDisplayable(doc.id, doc.data()) &&
+              _matchesFilters(doc.data()))
+            _Candidate(doc.id, doc.data()),
+      ];
+      debugPrint('検索: プレミアムを${snap.docs.length}人読み込み、${result.length}人が条件に一致');
+      return result;
+    } catch (e) {
+      // 💡 プレミアムの読み込みに失敗しても、普通の検索結果は表示する
+      debugPrint('プレミアム取得エラー: $e');
+      return const [];
+    }
+  }
+
   void _addResults(List<_Candidate> items) {
     for (final c in items) {
       if (_resultIds.add(c.id)) _results.add(c);
@@ -477,7 +520,20 @@ class _SearchScreenState extends State<SearchScreen> {
 
     try {
       final batch = <_Candidate>[];
-      if (_cursor == null) batch.addAll(await _fetchIdMatches(req));
+      final bool isFirstLoad =
+          _results.isEmpty && _cursor == null && _phase == 0;
+
+      // 💡 最初の読み込みのときだけ、ID検索の結果とプレミアムの人を一番上に置く
+      final top = <_Candidate>[];
+      if (isFirstLoad) {
+        final fetched = await Future.wait([
+          _fetchIdMatches(req),
+          _fetchPremium(req),
+        ]);
+        for (final c in [...fetched[0], ...fetched[1]]) {
+          if (!top.any((t) => t.id == c.id)) top.add(c);
+        }
+      }
 
       int scanned = 0;
       while (batch.length < _kMinResultsPerLoad &&
@@ -486,15 +542,21 @@ class _SearchScreenState extends State<SearchScreen> {
           req == _requestId) {
         final page = await _fetchPage(req);
         scanned += _kPageSize;
-        batch.addAll(page.where((c) => !batch.any((b) => b.id == c.id)));
+        batch.addAll(
+          page.where(
+            (c) =>
+                !batch.any((b) => b.id == c.id) &&
+                !top.any((t) => t.id == c.id),
+          ),
+        );
       }
       if (req != _requestId) return;
 
-      // 💡 読み込んだまとまりの中で、プレミアムプランの人を先に表示
+      // 💡 続きの読み込みでも、そのまとまりの中ではプレミアムの人を先に表示
       batch.sort(
         (a, b) => _planPriority(b.data).compareTo(_planPriority(a.data)),
       );
-      _addResults(batch);
+      _addResults([...top, ...batch]);
     } catch (e) {
       debugPrint('ユーザー検索エラー: $e');
       if (req == _requestId) _loadFailed = true;
@@ -513,10 +575,17 @@ class _SearchScreenState extends State<SearchScreen> {
 
     try {
       final pool = <_Candidate>[];
-      pool.addAll(await _fetchIdMatches(req));
+      final fetched = await Future.wait([
+        _fetchIdMatches(req),
+        _fetchPremium(req),
+      ]);
+      for (final c in [...fetched[0], ...fetched[1]]) {
+        if (!pool.any((p) => p.id == c.id)) pool.add(c);
+      }
       int scanned = 0;
       while (scanned < _kRecommendPool && _hasMore && req == _requestId) {
-        pool.addAll(await _fetchPage(req));
+        final page = await _fetchPage(req);
+        pool.addAll(page.where((c) => !pool.any((p) => p.id == c.id)));
         scanned += _kPageSize;
       }
       if (req != _requestId) return;

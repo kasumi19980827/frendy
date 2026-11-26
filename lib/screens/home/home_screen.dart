@@ -766,7 +766,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
         final String subText;
         if (badge == 'gold' || count >= _kGoldBadgePeers) {
-          subText = '金バッジ獲得済み！たくさんの出会いをありがとう🎉';
+          subText = '金バッジ獲得済み！たくさんの友達とつながってくれてありがとう🎉';
         } else if (badge == 'silver' || count >= _kSilverBadgePeers) {
           subText = '銀バッジ獲得済み！あと${_kGoldBadgePeers - count}人で金バッジ';
         } else {

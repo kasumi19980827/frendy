@@ -5,6 +5,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:matching_app/constants/ng_words.dart';
 import 'package:matching_app/screens/auth/identity_verification_screen.dart';
 
 // ============================================================================
@@ -334,6 +335,12 @@ class _TalkScreenState extends State<TalkScreen> with WidgetsBindingObserver {
       _toast('メッセージは$_kMaxLength文字以内で入力してください');
       return;
     }
+    // 友達作り専用：恋愛・出会い目的の言葉は送れない（サーバーのルールでも止めている）
+    final ng = findNgInMessage(text);
+    if (ng != null) {
+      _showNgDialog(ng);
+      return;
+    }
 
     final now = DateTime.now();
     if (now.difference(_lastSentAt) < _kSendInterval) return;
@@ -355,10 +362,37 @@ class _TalkScreenState extends State<TalkScreen> with WidgetsBindingObserver {
       if (_controller.text.isEmpty) _controller.text = text;
       _toast(
         e.code == 'permission-denied'
-            ? 'このユーザーにはメッセージを送れません'
+            ? 'このメッセージは送信できません（ブロック・利用制限・禁止の言葉などが原因の可能性があります）'
             : '送信に失敗しました。もう一度お試しください',
       );
     }
+  }
+
+  void _showNgDialog(String word) {
+    if (!mounted) return;
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Colors.white,
+        surfaceTintColor: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text(
+          'この内容は送信できません',
+          textAlign: TextAlign.center,
+          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 17),
+        ),
+        content: Text(
+          '$kNgNotice\n\n（「$word」が含まれています）',
+          style: const TextStyle(fontSize: 13, height: 1.6),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
   }
 
   void _toast(String message) {
